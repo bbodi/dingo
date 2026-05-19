@@ -371,7 +371,7 @@ func TestEnumRegistry_CollisionDetection(t *testing.T) {
 	registry := NewEnumRegistry()
 
 	// Register a sum type with "Ok" variant
-	registry.RegisterSumTypeVariant("Ok", "Result")
+	registry.RegisterSumTypeVariant("Ok", "Result", false)
 
 	// Register a value enum with same variant name - should detect collision
 	registry.RegisterValueEnum("Status", []string{"Ok", "Error"}, true)
@@ -405,7 +405,7 @@ func TestEnumRegistry_FormatCollisions(t *testing.T) {
 	}
 
 	// Create collision
-	registry.RegisterSumTypeVariant("Active", "State")
+	registry.RegisterSumTypeVariant("Active", "State", false)
 	registry.RegisterValueEnum("Status", []string{"Active", "Inactive"}, true)
 
 	formatted := registry.FormatCollisions()

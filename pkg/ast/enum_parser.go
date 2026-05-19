@@ -180,6 +180,22 @@ func (p *EnumParser) parseVariants() ([]*EnumVariant, error) {
 
 // parseVariant parses a single enum variant
 func (p *EnumParser) parseVariant() (*EnumVariant, error) {
+	// Optional '*' prefix marks the variant as pointer-stored.
+	// Examples:
+	//   enum Tree { *Node { ... }, Leaf }
+	// generates  func (*TreeNode) isTree() (pointer receiver) and
+	// match cases of the form `case *TreeNode:`.
+	var (
+		isPointer bool
+		starPos   token.Pos
+	)
+	if p.peek() == '*' {
+		isPointer = true
+		starPos = token.Pos(p.offset + p.pos + 1)
+		p.advance()
+		p.skipWhitespace()
+	}
+
 	name, err := p.parseIdent()
 	if err != nil {
 		return nil, fmt.Errorf("expected variant name: %w", err)
@@ -188,8 +204,10 @@ func (p *EnumParser) parseVariant() (*EnumVariant, error) {
 	p.skipWhitespace()
 
 	variant := &EnumVariant{
-		Name: name,
-		Kind: UnitVariant,
+		Name:    name,
+		Kind:    UnitVariant,
+		Pointer: isPointer,
+		Star:    starPos,
 	}
 
 	// Check for tuple variant: Variant(T)

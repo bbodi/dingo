@@ -196,6 +196,7 @@ type armGroup struct {
 	typeName  string // The Go type name for constructor patterns
 	arms      []*ast.MatchArm
 	isDefault bool // true for wildcard/variable patterns (default case)
+	pointer   bool // true if the variant is pointer-stored; emits `case *T:`
 }
 
 // generateGroupedCases groups arms by pattern type and generates cases.
@@ -214,6 +215,7 @@ func (g *MatchCodeGen) generateGroupedCases(typeSwitch bool) {
 			groups[key] = &armGroup{
 				typeName:  key,
 				isDefault: key == "default",
+				pointer:   g.patternIsPointerVariant(arm.Pattern),
 			}
 			order = append(order, key)
 		}
@@ -259,8 +261,12 @@ func (g *MatchCodeGen) generateGroupedCase(group *armGroup, typeSwitch bool) {
 		// Literal pattern
 		g.Write("case " + lit.Value + ":\n")
 	} else {
-		// Constructor pattern
-		g.Write("case " + group.typeName + ":\n")
+		// Constructor pattern. Pointer-stored variants emit `case *T:`.
+		caseType := group.typeName
+		if group.pointer {
+			caseType = "*" + caseType
+		}
+		g.Write("case " + caseType + ":\n")
 	}
 
 	// Extract bindings from first arm (all arms in group have same pattern structure)
@@ -359,6 +365,7 @@ func (g *MatchCodeGen) generateGroupedCasesWithAssignment(varName string, typeSw
 			groups[key] = &armGroup{
 				typeName:  key,
 				isDefault: key == "default",
+				pointer:   g.patternIsPointerVariant(arm.Pattern),
 			}
 			order = append(order, key)
 		}
@@ -379,13 +386,17 @@ func (g *MatchCodeGen) generateGroupedCaseWithAssignment(group *armGroup, varNam
 
 	firstArm := group.arms[0]
 
-	// Generate case clause header
+	// Generate case clause header. Pointer-stored variants emit `case *T:`.
 	if group.isDefault {
 		g.Write("default:\n")
 	} else if lit, ok := firstArm.Pattern.(*ast.LiteralPattern); ok {
 		g.Write("case " + lit.Value + ":\n")
 	} else {
-		g.Write("case " + group.typeName + ":\n")
+		caseType := group.typeName
+		if group.pointer {
+			caseType = "*" + caseType
+		}
+		g.Write("case " + caseType + ":\n")
 	}
 
 	// Extract bindings from first arm
@@ -532,6 +543,10 @@ func (g *MatchCodeGen) generateConstructorCase(pattern *ast.ConstructorPattern, 
 	// - Enum: Status_Pending → StatusPending (strip underscore prefix)
 	typeName := g.constructorToTypeName(pattern.Name)
 
+	// Pointer-stored variants emit `case *T:`.
+	if g.isPointerVariant(pattern.Name) {
+		typeName = "*" + typeName
+	}
 	g.Write("case " + typeName + ":\n")
 
 	// Extract bindings from constructor parameters
@@ -711,6 +726,26 @@ func (g *MatchCodeGen) generateArmBody(arm *ast.MatchArm, bindings []Binding) {
 //   - Status_Pending → StatusPending (strip underscore)
 //   - Status_Active → StatusActive (strip underscore)
 //   - UserCreated (with registry) → EventUserCreated (prefix from enum registry)
+// isPointerVariant reports whether a constructor name refers to a sum-type
+// variant that was declared with the `*Name` pointer-stored form.
+// Built-in Result/Option variants are always value-stored.
+func (g *MatchCodeGen) isPointerVariant(constructorName string) bool {
+	if g.Context == nil || g.Context.ValueEnumReg == nil {
+		return false
+	}
+	return g.Context.ValueEnumReg.IsPointerVariant(constructorName)
+}
+
+// patternIsPointerVariant unwraps a pattern to its constructor name (if any)
+// and reports whether that variant is pointer-stored.
+func (g *MatchCodeGen) patternIsPointerVariant(pattern ast.Pattern) bool {
+	cp, ok := pattern.(*ast.ConstructorPattern)
+	if !ok {
+		return false
+	}
+	return g.isPointerVariant(cp.Name)
+}
+
 func (g *MatchCodeGen) constructorToTypeName(constructorName string) string {
 	// Check for built-in Result/Option constructors
 	switch constructorName {

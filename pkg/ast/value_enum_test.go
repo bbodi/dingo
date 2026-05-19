@@ -256,8 +256,8 @@ func TestEnumRegistry(t *testing.T) {
 	registry := NewEnumRegistry()
 
 	// Register a sum type
-	registry.RegisterSumTypeVariant("Ok", "Result")
-	registry.RegisterSumTypeVariant("Err", "Result")
+	registry.RegisterSumTypeVariant("Ok", "Result", false)
+	registry.RegisterSumTypeVariant("Err", "Result", false)
 
 	// Register a value enum
 	registry.RegisterValueEnum("Status", []string{"Pending", "Active"}, true)

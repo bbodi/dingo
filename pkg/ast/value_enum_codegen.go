@@ -198,6 +198,11 @@ type EnumRegistry struct {
 	// Example: "Ok" -> "Result"
 	SumTypeVariants map[string]string
 
+	// PointerVariants is the set of sum-type variants declared as
+	// pointer-stored (e.g. `*Node { ... }`). Match codegen consults this
+	// to decide whether to emit `case T:` or `case *T:`.
+	PointerVariants map[string]bool
+
 	// ValueEnumVariants maps variant name to ValueEnumInfo for value enums
 	// Example: "Pending" -> &ValueEnumInfo{EnumName: "Status", ...}
 	ValueEnumVariants map[string]*ValueEnumInfo
@@ -214,13 +219,16 @@ type EnumRegistry struct {
 func NewEnumRegistry() *EnumRegistry {
 	return &EnumRegistry{
 		SumTypeVariants:   make(map[string]string),
+		PointerVariants:   make(map[string]bool),
 		ValueEnumVariants: make(map[string]*ValueEnumInfo),
 		EnumToVariants:    make(map[string][]string),
 	}
 }
 
-// RegisterSumTypeVariant adds a sum type variant to the registry
-func (r *EnumRegistry) RegisterSumTypeVariant(variantName, enumName string) {
+// RegisterSumTypeVariant adds a sum type variant to the registry. pointer
+// should be true when the variant is declared as `*Name` and is therefore
+// stored as a pointer in the enum interface.
+func (r *EnumRegistry) RegisterSumTypeVariant(variantName, enumName string, pointer bool) {
 	// Check for collision with value enum
 	if info := r.ValueEnumVariants[variantName]; info != nil {
 		r.Collisions = append(r.Collisions,
@@ -229,7 +237,19 @@ func (r *EnumRegistry) RegisterSumTypeVariant(variantName, enumName string) {
 	}
 
 	r.SumTypeVariants[variantName] = enumName
+	if pointer {
+		r.PointerVariants[variantName] = true
+	}
 	r.EnumToVariants[enumName] = append(r.EnumToVariants[enumName], variantName)
+}
+
+// IsPointerVariant reports whether a sum-type variant is stored as a
+// pointer (declared as `*Name` in the enum body).
+func (r *EnumRegistry) IsPointerVariant(variantName string) bool {
+	if r == nil {
+		return false
+	}
+	return r.PointerVariants[variantName]
 }
 
 // RegisterValueEnum adds a value enum and all its variants to the registry
@@ -483,7 +503,7 @@ func TransformValueEnumSource(src []byte, filename string) ([]byte, *EnumRegistr
 
 			// Register sum type variants
 			for _, v := range decl.Variants {
-				registry.RegisterSumTypeVariant(v.Name.Name, decl.Name.Name)
+				registry.RegisterSumTypeVariant(v.Name.Name, decl.Name.Name, v.Pointer)
 			}
 
 			// Calculate line:col from enumStart

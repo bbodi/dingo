@@ -199,6 +199,45 @@ case !opt.isSet:
 }
 ```
 
+### On Pointer-Stored Variants
+
+When the enum declares a variant with the `*Variant` prefix
+(see [sum-types.md](sum-types.md#pointer-stored-variants-variant-prefix))
+the match generator emits `case *T:` for that arm instead of `case T:`.
+Bindings work the same way because Go auto-dereferences through the
+pointer:
+
+```dingo
+enum Tree {
+    *Node { value: int, left: Tree, right: Tree }
+    Leaf
+}
+
+match t {
+    Node(_, left, right) => 1 + max(depth(left), depth(right))
+    Leaf => 0
+}
+```
+
+```go
+// Transpiled Go
+switch v := t.(type) {
+case *TreeNode:                     // ← pointer case for *Node variant
+    left := v.left                  // v is *TreeNode; v.left auto-derefs
+    right := v.right
+    return 1 + max(depth(left), depth(right))
+case TreeLeaf:                      // ← value case for unit variant
+    return 0
+}
+panic("unreachable: exhaustive match")
+```
+
+This is the form a `match` needs to interoperate with codebases that
+store AST nodes by pointer (the entire `go/ast` and `go/parser`
+ecosystem, plus `cmd/compile`). Without the `*` prefix, the generated
+`case T:` never matches a `*T` value in the interface and every call
+falls through to the `panic` arm.
+
 ---
 
 ## Inspiration from Other Languages

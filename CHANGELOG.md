@@ -2,6 +2,58 @@
 
 All notable changes to the Dingo compiler will be documented in this file.
 
+## Unreleased
+
+### Enum: pointer-stored variants
+
+Variants declared with a `*` prefix are stored as pointers in the enum
+interface:
+
+```dingo
+enum Tree {
+    *Node { value: int, left: Tree, right: Tree }   // pointer-stored
+    Leaf                                            // value-stored (unchanged)
+}
+```
+
+For pointer variants the generator emits:
+
+- `func (*TreeNode) isTree() {}` — pointer receiver on the marker
+- `func NewTreeNode(...) Tree { return &TreeNode{...} }` — `&` in the constructor
+- `case *TreeNode:` in `match` arms
+
+Value variants (no prefix) keep their existing codegen. The two forms
+can be mixed freely in the same enum.
+
+**Why:** without this, `match` arms emit `case T:` and silently miss a
+`*T` value stored in the enum interface — every call falls through to
+the `panic("unreachable")` arm. Pointer variants make Dingo enums
+interoperate with codebases that store AST nodes by pointer (the entire
+`go/ast`, `go/parser`, and `cmd/compile` tree).
+
+Files: `pkg/ast/enum.go`, `pkg/ast/enum_parser.go`, `pkg/ast/enum_codegen.go`,
+`pkg/ast/value_enum_codegen.go` (registry: `PointerVariants` set,
+`IsPointerVariant()` helper), `pkg/codegen/match.go`. New tests:
+`pkg/ast/pointer_variant_test.go`, `pkg/codegen/pointer_variant_match_test.go`.
+
+**Breaking change for one method signature:** `EnumRegistry.RegisterSumTypeVariant`
+now takes a third argument `pointer bool`. Existing call sites in dingo are
+updated; external callers (none known) must pass `false` to preserve old
+behaviour.
+
+### Enum parser: `[]*T` field types
+
+The struct-variant field-type parser now accepts arbitrary nesting of
+`*` (pointer) and `[]` (slice) prefixes in any order: `*T`, `[]T`,
+`[]*T`, `*[]T`, `[][]T`, `**T`, etc. Previously only `*...*[]T`-shaped
+prefixes parsed; `[]*T` (slice of pointer) silently failed and the
+downstream go/parser produced the confusing
+`"expected declaration, found enum"` error.
+
+Files: `pkg/ast/enum_parser.go`. Tests: `pkg/ast/enum_parser_test.go`.
+
+---
+
 ## [0.4.1] - 2025-12-10
 
 ### CLI Restructure (Go Compiler Parity)

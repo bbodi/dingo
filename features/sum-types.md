@@ -198,6 +198,98 @@ func handleResponse(resp HttpResponse) string {
 
 ---
 
+## Pointer-Stored Variants (`*Variant` Prefix)
+
+By default each variant is **value-stored**: the constructor returns a struct value
+boxed in the enum interface, the marker method has a value receiver, and a `match`
+arm matches `case T:`. That fits self-contained domains where variants are short-lived
+and immutable.
+
+For variants that are large, mutable, or need pointer identity — most importantly
+**AST node hierarchies** — prefix the variant with `*` to declare it pointer-stored:
+
+```dingo
+enum Tree {
+    *Node { value: int, left: Tree, right: Tree }   // pointer-stored
+    Leaf                                            // value-stored
+}
+```
+
+### What `*` changes in the generated Go
+
+| Aspect | Value variant (default) | Pointer variant (`*` prefix) |
+|---|---|---|
+| Marker receiver | `func (T) isEnum() {}` | `func (*T) isEnum() {}` |
+| Constructor return | `return T{...}` | `return &T{...}` |
+| `match` arm case | `case T:` | `case *T:` |
+| Satisfies enum interface | `T` and `*T` both | only `*T` |
+| Mutability through interface | copy each access | shared mutation |
+
+For the `Tree` example above:
+
+```go
+type Tree interface { isTree() }
+
+// Pointer-stored Node
+type TreeNode struct {
+    value int
+    left  Tree
+    right Tree
+}
+func (*TreeNode) isTree() {}
+func NewTreeNode(value int, left Tree, right Tree) Tree {
+    return &TreeNode{value: value, left: left, right: right}
+}
+
+// Value-stored Leaf (unchanged)
+type TreeLeaf struct{}
+func (TreeLeaf) isTree() {}
+func NewTreeLeaf() Tree  { return TreeLeaf{} }
+
+// match emits the right case form for each variant:
+func depth(t Tree) int {
+    switch v := t.(type) {
+    case *TreeNode:                    // ← pointer case
+        return 1 + max(depth(v.left), depth(v.right))
+    case TreeLeaf:                     // ← value case
+        return 0
+    }
+    panic("unreachable: exhaustive match")
+}
+```
+
+### When to use pointer variants
+
+Use `*Variant` when any of the following apply:
+
+- **The codebase already uses pointers** for the same shape (the entire `go/ast`,
+  `go/parser`, and `cmd/compile` tree do this). Without `*Variant`, a `match` arm
+  emits `case T:` and never matches a `*T` value stored in the interface — leading
+  to silent fall-through to the `panic("unreachable")` arm. With `*Variant` the
+  case is `case *T:` and the match works.
+- **The variant is large** (many fields, or fields with pointers). Pointer storage
+  avoids copying the whole struct each time the interface is read.
+- **The variant is built incrementally**, mutating fields after construction
+  (e.g. parser populating an AST node). A value variant cannot be mutated through
+  the interface — every `v := iface.(T)` is a fresh copy.
+- **Multiple references to the same logical node** should share identity
+  (`==` comparison, slice membership). Value variants compare by content.
+
+Value variants stay the default because:
+
+- Simpler ownership: no nil-pointer cases on a unit variant.
+- Smaller code for short data carriers (`Status`, `Color`, `RGB { r, g, b: int }`).
+- Compatible with all existing Dingo examples — adding the feature did not change
+  any value-stored semantics.
+
+### Mixing pointer and value variants
+
+The two forms can coexist freely in the same enum (see `Tree` above). Each variant's
+storage is decided independently. The match generator looks up each pattern in the
+enum registry and emits `case T:` or `case *T:` per arm.
+
+---
+
 ## Design Decision: No Is* Methods
 
 ### The Question

@@ -91,8 +91,14 @@ func (g *EnumCodeGen) generateVariant(enumName, interfaceMethod, typeParams stri
 	}
 	g.buf.WriteString("}\n")
 
-	// Interface method
+	// Interface method.
+	// Pointer-stored variants get a pointer receiver so only *T satisfies
+	// the enum interface (not value T). This matches the `case *T:` form
+	// emitted by match codegen for the same variant.
 	g.buf.WriteString("func (")
+	if variant.Pointer {
+		g.buf.WriteString("*")
+	}
 	g.buf.WriteString(structName)
 	g.buf.WriteString(typeParams)
 	g.buf.WriteString(") ")
@@ -129,6 +135,10 @@ func (g *EnumCodeGen) generateConstructor(enumName, typeParams string, variant *
 	g.buf.WriteString(enumName)
 	g.buf.WriteString(typeParams)
 	g.buf.WriteString(" { return ")
+	// Pointer-stored variants return &T{...}.
+	if variant.Pointer {
+		g.buf.WriteString("&")
+	}
 	g.buf.WriteString(structName)
 	g.buf.WriteString(typeParams)
 	g.buf.WriteString("{")
@@ -246,7 +256,7 @@ func ExtractFullEnumRegistry(src []byte) *EnumRegistry {
 
 			// Register sum type variants
 			for _, v := range decl.Variants {
-				registry.RegisterSumTypeVariant(v.Name.Name, decl.Name.Name)
+				registry.RegisterSumTypeVariant(v.Name.Name, decl.Name.Name, v.Pointer)
 			}
 		}
 	}

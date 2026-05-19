@@ -53,16 +53,30 @@ func (t *TypeParamList) String() string {
 //   - Red (unit variant)
 //   - Ok(T) (tuple variant)
 //   - RGB { r: int, g: int, b: int } (struct variant)
+//   - *Node { left: *Tree, right: *Tree } (pointer-stored variant)
+//
+// When Pointer is true the variant is stored as a pointer in the enum
+// interface. The generated marker method has a pointer receiver, the
+// constructor returns &T{...}, and `match` cases use `case *T:`. This
+// makes the variant compatible with Go codebases that pass AST-style
+// nodes by pointer (the entire go/ast and go/parser ecosystem).
 type EnumVariant struct {
-	Name   *Ident        // Variant name
-	Kind   EnumFieldKind // Variant kind (unit/tuple/struct)
-	LDelim token.Pos     // Position of '(' or '{' (zero if unit)
-	Fields []*EnumField  // Fields (empty for unit variants)
-	RDelim token.Pos     // Position of ')' or '}' (zero if unit)
-	Comma  token.Pos     // Position of trailing comma (if present)
+	Name    *Ident        // Variant name
+	Kind    EnumFieldKind // Variant kind (unit/tuple/struct)
+	Pointer bool          // True if variant declared as *Name (pointer-stored)
+	Star    token.Pos     // Position of the '*' prefix (zero if !Pointer)
+	LDelim  token.Pos     // Position of '(' or '{' (zero if unit)
+	Fields  []*EnumField  // Fields (empty for unit variants)
+	RDelim  token.Pos     // Position of ')' or '}' (zero if unit)
+	Comma   token.Pos     // Position of trailing comma (if present)
 }
 
-func (v *EnumVariant) Pos() token.Pos { return v.Name.Pos() }
+func (v *EnumVariant) Pos() token.Pos {
+	if v.Pointer && v.Star.IsValid() {
+		return v.Star
+	}
+	return v.Name.Pos()
+}
 func (v *EnumVariant) End() token.Pos {
 	if v.RDelim.IsValid() {
 		return v.RDelim + 1
@@ -71,6 +85,9 @@ func (v *EnumVariant) End() token.Pos {
 }
 func (v *EnumVariant) String() string {
 	s := v.Name.Name
+	if v.Pointer {
+		s = "*" + s
+	}
 	if len(v.Fields) == 0 {
 		return s
 	}
