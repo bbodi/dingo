@@ -833,6 +833,18 @@ func (p *PrattParser) parseCallExpr(left ast.Expr) ast.Expr {
 // parseIndexExpr handles the infix LBRACKET operator (index/slice expressions)
 // This allows parsing expressions like points[0] or arr[1:3]
 func (p *PrattParser) parseIndexExpr(left ast.Expr) ast.Expr {
+	// Defensive: an earlier prefix parselet may have returned nil without
+	// adding an error (typically when scanning a type expression the
+	// Pratt parser doesn't fully model, e.g. `make(map[K][N]V)` where
+	// the array `[N]` would be treated as an index on the partially-
+	// parsed map). Calling `.String()` on a nil ast.Expr later in this
+	// function segfaults; bail out cleanly instead so the StmtParser-
+	// based statement scan continues. The Go parser downstream handles
+	// the actual semantics correctly.
+	if left == nil {
+		return nil
+	}
+
 	// Current token is LBRACKET '['
 	lbracketPos := p.curToken.Pos
 
