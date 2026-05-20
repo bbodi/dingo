@@ -250,8 +250,12 @@ func transformTupleLiterals(src []byte) ([]byte, error) {
 			// Skip if this is a function call (preceded by IDENT or RPAREN)
 			// Also skip if preceded by FUNC keyword (function literal parameters)
 			// Also skip if preceded by RBRACKET (generic function parameters: func F[T any](...))
+			// Also skip if preceded by RBRACE (immediately-invoked function
+			// expression: `func(...) {...}(args)`, `defer func(){...}()`,
+			// `go func(){...}()`). In Go, `}(` is only ever a call site.
 			if prevToken.Kind == tokenizer.IDENT || prevToken.Kind == tokenizer.RPAREN ||
-				prevToken.Kind == tokenizer.FUNC || prevToken.Kind == tokenizer.RBRACKET {
+				prevToken.Kind == tokenizer.FUNC || prevToken.Kind == tokenizer.RBRACKET ||
+				prevToken.Kind == tokenizer.RBRACE {
 				prevPrevToken = prevToken
 				prevToken = t
 				continue
