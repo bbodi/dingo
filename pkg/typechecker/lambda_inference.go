@@ -1365,48 +1365,120 @@ func (inf *LambdaTypeInferrer) inferStandaloneLambdas() {
 	// 1. Have all parameters typed (not 'any')
 	// 2. Have 'any' as return type
 	// 3. Have a return expression we can analyze
-	ast.Inspect(inf.file, func(n ast.Node) bool {
-		funcLit, ok := n.(*ast.FuncLit)
-		if !ok {
-			return true
-		}
+	// 4. Are in a *standalone* position — the RHS of an assignment,
+	//    short-var declaration, or var GenDecl. These are the only
+	//    positions Dingo lambda codegen lands `func(...) any { ... }`
+	//    in. In other positions (composite-literal field, call
+	//    argument, slice/map element, return statement, …) the
+	//    surrounding context is the type authority: rewriting an
+	//    explicit user-written `any` to a narrower type breaks
+	//    contracts like `sync.Pool.New: func() any` where the field
+	//    type itself is `func() any`.
+	//
+	// We walk with a parent stack so each FuncLit knows what its
+	// immediate enclosing AST node is, without relying on
+	// nonexistent parent pointers.
+	var stack []stackEntry
+	// We also need to know whether the funcLit is on the RHS of an
+	// AssignStmt vs. the LHS (LHS would be a `=` pattern destructure,
+	// which is unusual for funcLit but we should be safe). Track via
+	// post-order check.
 
-		// Skip if no return type or return type is not 'any'
-		if funcLit.Type.Results == nil || len(funcLit.Type.Results.List) == 0 {
-			return true
-		}
-		if len(funcLit.Type.Results.List) != 1 {
-			// Multiple return values - skip for now
-			return true
-		}
-		if !inf.isAnyType(funcLit.Type.Results.List[0].Type) {
-			// Return type is already concrete
-			return true
-		}
-
-		// Check if all parameters are typed (not 'any')
-		if !inf.allParamsTyped(funcLit) {
-			return true
-		}
-
-		// Try to infer return type from body expression
-		returnType := inf.inferReturnTypeFromBody(funcLit)
-		if returnType != nil {
-			// Skip UntypedNil - interface{} is the correct return type for nil-returning functions
-			// This catches UntypedNil from any code path (info.Types or analyzeExpressionType)
-			if basic, ok := returnType.(*types.Basic); ok && basic.Kind() == types.UntypedNil {
-				return true
+	var visit func(n ast.Node) bool
+	visit = func(n ast.Node) bool {
+		if n == nil {
+			// ast.Inspect calls visit(nil) to signal "leaving" a node.
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
 			}
-			// Rewrite the return type
-			newTypeExpr := inf.typeToExpr(returnType)
-			if newTypeExpr != nil {
-				funcLit.Type.Results.List[0].Type = newTypeExpr
-				inf.changed = true
-			}
+			return true
 		}
 
+		funcLit, isFuncLit := n.(*ast.FuncLit)
+		if !isFuncLit {
+			stack = append(stack, stackEntry{node: n})
+			return true
+		}
+
+		// Inside a FuncLit: continue descending so nested lambdas
+		// also get a chance to be analysed.
+		defer func() { /* stack frame appended below */ }()
+
+		// Apply the inference rules to *this* FuncLit. We don't
+		// recurse into the body here — ast.Inspect will do that.
+		inf.maybeRewriteStandaloneLambda(funcLit, stack)
+
+		stack = append(stack, stackEntry{node: n})
 		return true
-	})
+	}
+	ast.Inspect(inf.file, visit)
+}
+
+// maybeRewriteStandaloneLambda applies Layer-5 narrowing to a single
+// function literal IF and ONLY IF it occupies a position where Dingo
+// codegen would have emitted a placeholder `any` return type. See
+// inferStandaloneLambdas for the position rules.
+func (inf *LambdaTypeInferrer) maybeRewriteStandaloneLambda(funcLit *ast.FuncLit, stack []stackEntry) {
+	// Skip if no return type or return type is not 'any'.
+	if funcLit.Type.Results == nil || len(funcLit.Type.Results.List) == 0 {
+		return
+	}
+	if len(funcLit.Type.Results.List) != 1 {
+		// Multiple return values — out of scope.
+		return
+	}
+	if !inf.isAnyType(funcLit.Type.Results.List[0].Type) {
+		return
+	}
+
+	// Check if all parameters are typed (not 'any').
+	if !inf.allParamsTyped(funcLit) {
+		return
+	}
+
+	// Position check: walk back through the parent stack to find the
+	// closest meaningful enclosing node. A few wrappers can sit
+	// between the FuncLit and its real binding site:
+	//   - ParenExpr:   (func(){…})  (parenthesised lambda value)
+	// Anything else is the enclosing context. Allowed contexts are:
+	//   - *ast.AssignStmt   (x := func()any{…} or x = func()any{…})
+	//   - *ast.ValueSpec    (var x = func()any{…})
+	//   - *ast.GenDecl      (top-level var decl with a single spec)
+	allowed := false
+	for i := len(stack) - 1; i >= 0; i-- {
+		switch stack[i].node.(type) {
+		case *ast.ParenExpr:
+			continue
+		case *ast.AssignStmt, *ast.ValueSpec, *ast.GenDecl:
+			allowed = true
+		}
+		break
+	}
+	if !allowed {
+		return
+	}
+
+	returnType := inf.inferReturnTypeFromBody(funcLit)
+	if returnType == nil {
+		return
+	}
+	// Skip UntypedNil — `any` is the correct return type for
+	// nil-returning functions.
+	if basic, ok := returnType.(*types.Basic); ok && basic.Kind() == types.UntypedNil {
+		return
+	}
+	newTypeExpr := inf.typeToExpr(returnType)
+	if newTypeExpr == nil {
+		return
+	}
+	funcLit.Type.Results.List[0].Type = newTypeExpr
+	inf.changed = true
+}
+
+// stackEntry is shared with inferStandaloneLambdas.
+type stackEntry struct {
+	node  ast.Node
+	index int
 }
 
 // allParamsTyped checks if all parameters in a function literal have concrete types.
