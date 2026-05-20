@@ -421,15 +421,71 @@ func (p *EnumParser) advance() {
 }
 
 func (p *EnumParser) skipWhitespace() {
-	for p.pos < len(p.src) && (p.src[p.pos] == ' ' || p.src[p.pos] == '\t' || p.src[p.pos] == '\n' || p.src[p.pos] == '\r') {
-		p.pos++
+	for p.pos < len(p.src) {
+		switch p.src[p.pos] {
+		case ' ', '\t', '\n', '\r':
+			p.pos++
+		case '/':
+			if !p.skipComment() {
+				return
+			}
+		default:
+			return
+		}
 	}
 }
 
 func (p *EnumParser) skipWhitespaceAndCommas() {
-	for p.pos < len(p.src) && (p.src[p.pos] == ' ' || p.src[p.pos] == '\t' || p.src[p.pos] == '\n' || p.src[p.pos] == '\r' || p.src[p.pos] == ',') {
-		p.pos++
+	for p.pos < len(p.src) {
+		switch p.src[p.pos] {
+		case ' ', '\t', '\n', '\r', ',':
+			p.pos++
+		case '/':
+			if !p.skipComment() {
+				return
+			}
+		default:
+			return
+		}
 	}
+}
+
+// skipComment advances past a `// ...` line comment or `/* ... */`
+// block comment when the cursor is positioned at a `/`. Returns true if
+// a comment was consumed, false if the `/` was not the start of a
+// comment (in which case the cursor is unchanged). Tolerating comments
+// in the whitespace skippers lets users document individual variants
+// or shared fields without a separate documentation mechanism — natural
+// when adapting a Go codebase to Dingo enums.
+func (p *EnumParser) skipComment() bool {
+	if p.pos+1 >= len(p.src) || p.src[p.pos] != '/' {
+		return false
+	}
+	switch p.src[p.pos+1] {
+	case '/':
+		// Line comment: advance to end of line (or end of input).
+		p.pos += 2
+		for p.pos < len(p.src) && p.src[p.pos] != '\n' {
+			p.pos++
+		}
+		return true
+	case '*':
+		// Block comment: advance to matching `*/`. Tolerate
+		// unterminated comments (consume to end-of-input) so a
+		// malformed source doesn't loop forever.
+		p.pos += 2
+		for p.pos+1 < len(p.src) {
+			if p.src[p.pos] == '*' && p.src[p.pos+1] == '/' {
+				p.pos += 2
+				return true
+			}
+			p.pos++
+		}
+		// Unterminated — swallow remaining input.
+		p.pos = len(p.src)
+		return true
+	}
+	return false
 }
 
 func (p *EnumParser) matchKeyword(keyword string) bool {
