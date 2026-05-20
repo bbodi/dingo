@@ -1174,23 +1174,37 @@ func findMethodReturnCount(src []byte, methodName string) int {
 	return returnCount
 }
 
-// IsResultType checks if a type string represents a Result type (dgo.Result or Result)
+// IsResultType checks if a type string represents a Result type (dgo.Result or Result).
+//
+// A name only counts as Result if it is *exactly* `Result` (bare,
+// no params) or `Result[...]` (parameterised). A longer identifier
+// that happens to start with the letters `Result` — `ResultPropBits`,
+// `ResultType`, `Resultant`, etc. — is a different type and must
+// not be reported as Result. Without this distinction the
+// result-tuple validator misfires on ordinary multi-return
+// assignments whose return-type name shares the prefix (hit by
+// cmd/compile/internal/inline/inlheur/analyze_func_returns.dingo).
 func IsResultType(typeStr string) bool {
-	// Check for dgo.Result[T, E] or Result[T, E]
+	const tag = "Result"
+	// Helper: does `s` start with `Result` followed by either end-of-string
+	// or `[` (the only valid continuation for a Result type name)?
+	matchesAtStart := func(s string) bool {
+		if len(s) < len(tag) || s[:len(tag)] != tag {
+			return false
+		}
+		return len(s) == len(tag) || s[len(tag)] == '['
+	}
+
+	// Dot-qualified case: pkg.Result or pkg.Result[T, E].
 	for i := 0; i < len(typeStr); i++ {
 		if typeStr[i] == '.' {
-			// Has package prefix, check for dgo.Result
-			remaining := typeStr[i+1:]
-			if len(remaining) >= 6 && remaining[:6] == "Result" {
+			if matchesAtStart(typeStr[i+1:]) {
 				return true
 			}
 		}
 	}
-	// Check for unqualified Result
-	if len(typeStr) >= 6 && typeStr[:6] == "Result" {
-		return true
-	}
-	return false
+	// Unqualified case: Result or Result[T, E].
+	return matchesAtStart(typeStr)
 }
 
 // ExtractResultOkType extracts the T from Result[T, E] or dgo.Result[T, E]
