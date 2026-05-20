@@ -142,16 +142,25 @@ func FindDingoExpressions(src []byte) ([]ExprLocation, error) {
 				}
 			}
 
-			// Forward lookahead: a match expression must have a `{` at
-			// outer paren-depth before a statement terminator. A bare
-			// `match(args)` call won't (the `(` opens depth 1, the `)`
-			// closes it, and what follows is some other expression or
-			// statement boundary). Without this check, the Go compiler's
-			// standalone calls like `_ = match(7)` would be mis-parsed
-			// here and abort the whole transpile with
-			// `unmatched closing brace in match expression`.
+			// Forward lookahead: a real match expression has the shape
+			// `match <scrutinee> { <pat> => <body>, ... }`. To accept it
+			// here, we require BOTH:
+			//   (a) a top-level `{` after `match` before any statement
+			//       terminator (so bare calls like `_ = match(7)` are
+			//       rejected — the call's `(` and `)` open and close at
+			//       depth 1, then no `{` follows at depth 0),
+			//   (b) an `=>` token inside the `{ ... }` body (so
+			//       `switch match { ... }`, `if match { ... }`, etc.
+			//       where `match` is an ordinary variable name are not
+			//       mis-detected — switch/if bodies use `case` or plain
+			//       statements, never `=>`).
+			//
+			// The two checks together let us treat `match` as an
+			// identifier in all the non-keyword contexts the Go compiler
+			// uses (variable name, method name, function name) while
+			// preserving real match-expression detection.
 			if currentIdx >= 0 {
-				looksLikeMatch := false
+				openBraceIdx := -1
 				parenD, brackD := 0, 0
 			scan:
 				for j := currentIdx + 1; j < len(allTokens); j++ {
@@ -172,7 +181,7 @@ func FindDingoExpressions(src []byte) ([]ExprLocation, error) {
 						}
 					case tokenizer.LBRACE:
 						if parenD == 0 && brackD == 0 {
-							looksLikeMatch = true
+							openBraceIdx = j
 						}
 						break scan
 					case tokenizer.RBRACE:
@@ -185,7 +194,29 @@ func FindDingoExpressions(src []byte) ([]ExprLocation, error) {
 						}
 					}
 				}
-				if !looksLikeMatch {
+				if openBraceIdx < 0 {
+					tok.Advance()
+					continue
+				}
+				// Peek inside the `{ ... }` for an arrow. We scan with
+				// brace-depth tracking so a nested `{}` inside a body
+				// expression doesn't end the search early.
+				hasArrow := false
+				braceD := 1
+				for j := openBraceIdx + 1; j < len(allTokens) && braceD > 0; j++ {
+					switch allTokens[j].Kind {
+					case tokenizer.LBRACE:
+						braceD++
+					case tokenizer.RBRACE:
+						braceD--
+					case tokenizer.ARROW:
+						if braceD == 1 {
+							hasArrow = true
+							braceD = 0 // break
+						}
+					}
+				}
+				if !hasArrow {
 					tok.Advance()
 					continue
 				}

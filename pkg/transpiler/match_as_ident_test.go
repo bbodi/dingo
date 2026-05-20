@@ -85,6 +85,61 @@ func use(d *D) { _ = d.match(1) }
 	}
 }
 
+func TestMatchIdent_VariableUsage(t *testing.T) {
+	// `match` as an ordinary local variable. The Go compiler does this
+	// in cmd/compile/internal/ssa/cpufeatures.dingo: a string `match`
+	// is set inside a loop and then used as a switch subject.
+	src := `package x
+
+func f(items []string, want string) string {
+	var match string
+	for _, s := range items {
+		if s == want {
+			match = s
+			break
+		}
+	}
+	switch match {
+	case "":
+		return "miss"
+	default:
+		return match
+	}
+}
+`
+	out, err := PureASTTranspile([]byte(src), "")
+	if err != nil {
+		t.Fatalf("transpile failed: %v", err)
+	}
+	if !strings.Contains(string(out), "switch match {") {
+		t.Errorf("switch on variable `match` corrupted.\n%s", out)
+	}
+	if !strings.Contains(string(out), "match = s") {
+		t.Errorf("assignment to `match` corrupted.\n%s", out)
+	}
+}
+
+func TestMatchIdent_BoolInIf(t *testing.T) {
+	// `match` as a boolean local — `if match { ... }`.
+	src := `package x
+
+func f(b bool) int {
+	match := b
+	if match {
+		return 1
+	}
+	return 0
+}
+`
+	out, err := PureASTTranspile([]byte(src), "")
+	if err != nil {
+		t.Fatalf("transpile failed: %v", err)
+	}
+	if !strings.Contains(string(out), "if match {") {
+		t.Errorf("if on variable `match` corrupted.\n%s", out)
+	}
+}
+
 func TestMatchExpr_StillWorks(t *testing.T) {
 	// Regression guard: ordinary match expressions must still be
 	// recognised. The context skip must not be too greedy.
