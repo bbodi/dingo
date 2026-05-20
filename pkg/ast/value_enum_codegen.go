@@ -203,6 +203,13 @@ type EnumRegistry struct {
 	// to decide whether to emit `case T:` or `case *T:`.
 	PointerVariants map[string]bool
 
+	// SharedFieldsEnums is the set of sum-type enums declared with a
+	// `shared { ... }` block (Option B layout). For these enums the
+	// codegen produces a struct (not an interface), and match codegen
+	// dispatches on the `tag` field instead of using a type switch.
+	// Key: enum name (e.g. "Expr"); value: always true (a set).
+	SharedFieldsEnums map[string]bool
+
 	// ValueEnumVariants maps variant name to ValueEnumInfo for value enums
 	// Example: "Pending" -> &ValueEnumInfo{EnumName: "Status", ...}
 	ValueEnumVariants map[string]*ValueEnumInfo
@@ -220,9 +227,27 @@ func NewEnumRegistry() *EnumRegistry {
 	return &EnumRegistry{
 		SumTypeVariants:   make(map[string]string),
 		PointerVariants:   make(map[string]bool),
+		SharedFieldsEnums: make(map[string]bool),
 		ValueEnumVariants: make(map[string]*ValueEnumInfo),
 		EnumToVariants:    make(map[string][]string),
 	}
+}
+
+// RegisterSharedFieldsEnum marks an enum as using the Option B
+// shared-fields struct layout. Called by ExtractFullEnumRegistry when
+// an EnumDecl's HasSharedFields() is true. The match codegen consults
+// IsSharedFieldsEnum to decide whether to emit tag-based dispatch.
+func (r *EnumRegistry) RegisterSharedFieldsEnum(enumName string) {
+	r.SharedFieldsEnums[enumName] = true
+}
+
+// IsSharedFieldsEnum reports whether an enum uses the shared-fields
+// struct layout (Option B). Safe on nil receiver.
+func (r *EnumRegistry) IsSharedFieldsEnum(enumName string) bool {
+	if r == nil {
+		return false
+	}
+	return r.SharedFieldsEnums[enumName]
 }
 
 // RegisterSumTypeVariant adds a sum type variant to the registry. pointer
@@ -504,6 +529,14 @@ func TransformValueEnumSource(src []byte, filename string) ([]byte, *EnumRegistr
 			// Register sum type variants
 			for _, v := range decl.Variants {
 				registry.RegisterSumTypeVariant(v.Name.Name, decl.Name.Name, v.Pointer)
+			}
+			// Mirror ExtractFullEnumRegistry: shared-fields enums need
+			// to be flagged so that match codegen routes through the
+			// Option B tag-dispatch path. Without this, callers that
+			// reuse the registry from the transform call site would
+			// fall back to the classic type-switch and emit invalid Go.
+			if decl.HasSharedFields() {
+				registry.RegisterSharedFieldsEnum(decl.Name.Name)
 			}
 
 			// Calculate line:col from enumStart

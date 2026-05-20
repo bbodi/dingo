@@ -67,6 +67,30 @@ func (p *EnumParser) ParseEnumDecl() (*EnumDecl, int, error) {
 	lbracePos := token.Pos(p.offset + p.pos + 1)
 	p.advance()
 
+	// Optional `shared { ... }` block (must be the first item).
+	// Triggers the shared-fields struct layout; see features/sum-types-shared-fields.md.
+	var sharedKw token.Pos
+	var sharedFields []*EnumField
+	p.skipWhitespaceAndCommas()
+	if p.matchKeyword("shared") {
+		sharedKw = token.Pos(p.offset + p.pos - len("shared") + 1)
+		p.skipWhitespace()
+		if p.peek() != '{' {
+			return nil, p.pos, fmt.Errorf("expected '{' after 'shared'")
+		}
+		p.advance()
+		fields, err := p.parseStructFields()
+		if err != nil {
+			return nil, p.pos, fmt.Errorf("invalid shared fields: %w", err)
+		}
+		sharedFields = fields
+		p.skipWhitespaceAndCommas()
+		if p.peek() != '}' {
+			return nil, p.pos, fmt.Errorf("expected '}' to close shared block")
+		}
+		p.advance()
+	}
+
 	// Parse variants
 	variants, err := p.parseVariants()
 	if err != nil {
@@ -83,12 +107,14 @@ func (p *EnumParser) ParseEnumDecl() (*EnumDecl, int, error) {
 	p.advance()
 
 	return &EnumDecl{
-		Enum:       enumPos,
-		Name:       name,
-		TypeParams: typeParams,
-		LBrace:     lbracePos,
-		Variants:   variants,
-		RBrace:     rbracePos,
+		Enum:         enumPos,
+		Name:         name,
+		TypeParams:   typeParams,
+		LBrace:       lbracePos,
+		SharedKw:     sharedKw,
+		SharedFields: sharedFields,
+		Variants:     variants,
+		RBrace:       rbracePos,
 	}, p.pos, nil
 }
 

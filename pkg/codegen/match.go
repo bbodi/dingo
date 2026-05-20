@@ -85,6 +85,14 @@ func (g *MatchCodeGen) Generate() ast.CodeGenResult {
 		return g.generateValueEnumMatch(info)
 	}
 
+	// Check for shared-fields (Option B) enums THIRD.
+	// These lower to a struct + tag + data-interface layout. Match
+	// expressions dispatch on `e.tag` and bind variant-specific fields
+	// by casting `e.data` to the matching variant Data struct.
+	if enumName := g.detectSharedFieldsEnum(); enumName != "" {
+		return g.generateSharedFieldsMatch(enumName)
+	}
+
 	// Check exhaustiveness for expression matches (sum types)
 	if g.Match.IsExpr {
 		if errResult := g.checkExhaustiveness(); len(errResult.Output) > 0 {

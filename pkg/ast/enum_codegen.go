@@ -29,6 +29,14 @@ func (g *EnumCodeGen) Generate(decl *EnumDecl, filename string, line, col int) [
 		g.buf.WriteString(directive)
 	}
 
+	// Dispatch to layout-specific codegen. The shared-fields layout
+	// (Option B) lowers the enum to a *struct* so methods can be
+	// defined directly on it; the classic layout uses an interface.
+	if decl.HasSharedFields() {
+		g.generateSharedFieldsLayout(decl)
+		return g.buf.Bytes()
+	}
+
 	enumName := decl.Name.Name
 	interfaceMethod := "is" + enumName
 	typeParams := g.getTypeParams(decl)
@@ -47,6 +55,234 @@ func (g *EnumCodeGen) Generate(decl *EnumDecl, filename string, line, col int) [
 	}
 
 	return g.buf.Bytes()
+}
+
+// generateSharedFieldsLayout emits the Option B layout:
+//   - <Enum>Tag uint8 with one constant per variant
+//   - <Enum>VariantData sealed marker interface (non-generic — the marker
+//     method is parameterless, so the interface doesn't need type params)
+//   - <Enum>[T any] struct holding shared fields + tag + data
+//   - <Enum><Variant>Data[T any] struct per variant (variant-specific only)
+//   - New<Enum><Variant>[T any](...) constructors taking shared + variant args
+//
+// Generics: the tag, tag-String and VariantData interface stay non-generic
+// (they don't carry type information). Everything that can hold or
+// produce a typed value — the enum struct, variant Data structs, and
+// constructors — gets the type-parameter list. Note: match codegen does
+// not yet inject type arguments when casting `e.data` for a generic
+// shared-fields enum (the case is opt-in via the `shared` block and not
+// currently exercised by the driving use case); see TODO in
+// match_shared_fields.go.
+func (g *EnumCodeGen) generateSharedFieldsLayout(decl *EnumDecl) {
+	enumName := decl.Name.Name
+	tagName := enumName + "Tag"
+	dataIface := enumName + "VariantData"
+	dataMarker := "is" + dataIface
+
+	// typeParams = "[T any]" or "" — full constraint form for declaration sites.
+	// typeArgs   = "[T]"      or "" — bare form for instantiation sites.
+	typeParams := g.getTypeParams(decl)
+	typeArgs := g.getTypeArgs(decl)
+
+	// 1. Tag type + constants (NEVER generic — same set of tags
+	//    regardless of type parameters).
+	g.buf.WriteString("type ")
+	g.buf.WriteString(tagName)
+	g.buf.WriteString(" uint8\n\n")
+
+	g.buf.WriteString("const (\n")
+	for i, v := range decl.Variants {
+		g.buf.WriteString("\t")
+		g.buf.WriteString(tagName)
+		g.buf.WriteString(v.Name.Name)
+		if i == 0 {
+			g.buf.WriteString(" ")
+			g.buf.WriteString(tagName)
+			g.buf.WriteString(" = iota")
+		}
+		g.buf.WriteString("\n")
+	}
+	g.buf.WriteString(")\n\n")
+
+	// 2. Tag String() for debugging / panic messages (non-generic).
+	g.buf.WriteString("func (t ")
+	g.buf.WriteString(tagName)
+	g.buf.WriteString(") String() string {\n\tswitch t {\n")
+	for _, v := range decl.Variants {
+		g.buf.WriteString("\tcase ")
+		g.buf.WriteString(tagName)
+		g.buf.WriteString(v.Name.Name)
+		g.buf.WriteString(": return \"")
+		g.buf.WriteString(v.Name.Name)
+		g.buf.WriteString("\"\n")
+	}
+	g.buf.WriteString("\t}\n\treturn \"")
+	g.buf.WriteString(tagName)
+	g.buf.WriteString("(?)\"\n}\n\n")
+
+	// 3. Sealed marker interface for variant payloads (non-generic —
+	//    the method has no parameters or return type, so it works
+	//    across all instantiations).
+	g.buf.WriteString("type ")
+	g.buf.WriteString(dataIface)
+	g.buf.WriteString(" interface { ")
+	g.buf.WriteString(dataMarker)
+	g.buf.WriteString("() }\n\n")
+
+	// 4. Enum struct: shared fields + tag + data.
+	//    Generic if the enum has type parameters.
+	g.buf.WriteString("type ")
+	g.buf.WriteString(enumName)
+	g.buf.WriteString(typeParams)
+	g.buf.WriteString(" struct {\n")
+	for _, f := range decl.SharedFields {
+		g.buf.WriteString("\t")
+		g.buf.WriteString(f.Name.Name)
+		g.buf.WriteString(" ")
+		g.buf.WriteString(f.Type.Text)
+		g.buf.WriteString("\n")
+	}
+	g.buf.WriteString("\ttag ")
+	g.buf.WriteString(tagName)
+	g.buf.WriteString("\n")
+	g.buf.WriteString("\tdata ")
+	g.buf.WriteString(dataIface)
+	g.buf.WriteString("\n}\n\n")
+
+	// 5. Tag accessor on the enum struct.
+	// `Tag()` is the public counterpart of the private `tag` field.
+	// Receiver carries the type-parameter list when generic.
+	g.buf.WriteString("func (e *")
+	g.buf.WriteString(enumName)
+	g.buf.WriteString(typeArgs)
+	g.buf.WriteString(") Tag() ")
+	g.buf.WriteString(tagName)
+	g.buf.WriteString(" { return e.tag }\n\n")
+
+	// 6. Per-variant Data structs + marker + constructor.
+	for _, v := range decl.Variants {
+		g.generateSharedFieldsVariant(decl, enumName, tagName, dataMarker, typeParams, typeArgs, v)
+	}
+}
+
+// getTypeArgs returns the bare type-argument list `[T, E]` used at
+// instantiation sites (`&Foo[T, E]{...}`), or "" if non-generic.
+// Compared with getTypeParams (`[T, E any]`), this strips the constraint.
+func (g *EnumCodeGen) getTypeArgs(decl *EnumDecl) string {
+	if decl.TypeParams == nil || len(decl.TypeParams.Params) == 0 {
+		return ""
+	}
+	var b bytes.Buffer
+	b.WriteString("[")
+	for i, p := range decl.TypeParams.Params {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(p.Name)
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+func (g *EnumCodeGen) generateSharedFieldsVariant(decl *EnumDecl, enumName, tagName, dataMarker, typeParams, typeArgs string, v *EnumVariant) {
+	dataStruct := enumName + v.Name.Name + "Data"
+
+	// Variant Data struct: only variant-specific fields (no shared).
+	// Generic if the enum is generic.
+	g.buf.WriteString("type ")
+	g.buf.WriteString(dataStruct)
+	g.buf.WriteString(typeParams)
+	g.buf.WriteString(" struct {")
+	if len(v.Fields) > 0 {
+		for i, f := range v.Fields {
+			if i > 0 {
+				g.buf.WriteString(";")
+			}
+			g.buf.WriteString(" ")
+			g.buf.WriteString(g.getFieldName(v, f, i))
+			g.buf.WriteString(" ")
+			g.buf.WriteString(f.Type.Text)
+		}
+		g.buf.WriteString(" ")
+	}
+	g.buf.WriteString("}\n")
+
+	// Marker method so the Data struct satisfies the sealed VariantData iface.
+	// Receiver uses bare type args (`*FooData[T]`).
+	g.buf.WriteString("func (*")
+	g.buf.WriteString(dataStruct)
+	g.buf.WriteString(typeArgs)
+	g.buf.WriteString(") ")
+	g.buf.WriteString(dataMarker)
+	g.buf.WriteString("() {}\n")
+
+	// Constructor: takes shared fields first, then variant-specific fields.
+	// Returns *Enum[T] (always pointer-stored — one canonical concrete
+	// type usable as a method receiver). The type-params block goes on
+	// the function name; the return and inner allocations use bare args.
+	ctorName := "New" + enumName + v.Name.Name
+	g.buf.WriteString("func ")
+	g.buf.WriteString(ctorName)
+	g.buf.WriteString(typeParams)
+	g.buf.WriteString("(")
+	first := true
+	for _, f := range decl.SharedFields {
+		if !first {
+			g.buf.WriteString(", ")
+		}
+		first = false
+		g.buf.WriteString(f.Name.Name)
+		g.buf.WriteString(" ")
+		g.buf.WriteString(f.Type.Text)
+	}
+	for i, f := range v.Fields {
+		if !first {
+			g.buf.WriteString(", ")
+		}
+		first = false
+		g.buf.WriteString(g.getParameterName(v, f, i))
+		g.buf.WriteString(" ")
+		g.buf.WriteString(f.Type.Text)
+	}
+	g.buf.WriteString(") *")
+	g.buf.WriteString(enumName)
+	g.buf.WriteString(typeArgs)
+	g.buf.WriteString(" {\n\treturn &")
+	g.buf.WriteString(enumName)
+	g.buf.WriteString(typeArgs)
+	g.buf.WriteString("{")
+	// shared field initializers
+	first = true
+	for _, f := range decl.SharedFields {
+		if !first {
+			g.buf.WriteString(", ")
+		}
+		first = false
+		g.buf.WriteString(f.Name.Name)
+		g.buf.WriteString(": ")
+		g.buf.WriteString(f.Name.Name)
+	}
+	if !first {
+		g.buf.WriteString(", ")
+	}
+	g.buf.WriteString("tag: ")
+	g.buf.WriteString(tagName)
+	g.buf.WriteString(v.Name.Name)
+	g.buf.WriteString(", data: &")
+	g.buf.WriteString(dataStruct)
+	g.buf.WriteString(typeArgs)
+	g.buf.WriteString("{")
+	for i, f := range v.Fields {
+		if i > 0 {
+			g.buf.WriteString(", ")
+		}
+		fieldName := g.getFieldName(v, f, i)
+		paramName := g.getParameterName(v, f, i)
+		g.buf.WriteString(fieldName)
+		g.buf.WriteString(": ")
+		g.buf.WriteString(paramName)
+	}
+	g.buf.WriteString("}}\n}\n\n")
 }
 
 // getTypeParams returns the type parameters string (e.g., "[T, E any]") or empty string
@@ -257,6 +493,12 @@ func ExtractFullEnumRegistry(src []byte) *EnumRegistry {
 			// Register sum type variants
 			for _, v := range decl.Variants {
 				registry.RegisterSumTypeVariant(v.Name.Name, decl.Name.Name, v.Pointer)
+			}
+			// If the enum uses the shared-fields layout (Option B), record
+			// that so match codegen dispatches on `tag` rather than via
+			// a Go type switch.
+			if decl.HasSharedFields() {
+				registry.RegisterSharedFieldsEnum(decl.Name.Name)
 			}
 		}
 	}

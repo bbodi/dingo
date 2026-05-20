@@ -9,13 +9,37 @@ import (
 // Examples:
 //   - enum Result[T, E] { Ok(T), Err(E) }
 //   - enum Color { Red, Green, Blue, RGB { r: int, g: int, b: int } }
+//
+// Shared-fields layout (Option B). When SharedFields is non-empty, the enum
+// is lowered to a *struct* (not an interface): the shared fields live on the
+// enum struct itself, while each variant gets a thin Data struct holding only
+// its variant-specific fields. The enum struct then carries `tag` + `data`
+// for discrimination. This lets the user define methods directly on the
+// enum type and avoids per-variant boilerplate for shared accessors.
+// See features/sum-types-shared-fields.md.
+//
+//	enum Expr {
+//	    shared { pos: Pos, op: Op }
+//	    *AddrExpr { X: Node }
+//	    *CallExpr { Fun: Node, Args: Nodes }
+//	}
+//
+// The `shared { ... }` block must be the first item inside the enum body.
 type EnumDecl struct {
-	Enum       token.Pos      // Position of 'enum' keyword
-	Name       *Ident         // Enum name
-	TypeParams *TypeParamList // Generic type parameters (optional)
-	LBrace     token.Pos      // Position of '{'
-	Variants   []*EnumVariant // Enum variants
-	RBrace     token.Pos      // Position of '}'
+	Enum         token.Pos      // Position of 'enum' keyword
+	Name         *Ident         // Enum name
+	TypeParams   *TypeParamList // Generic type parameters (optional)
+	LBrace       token.Pos      // Position of '{'
+	SharedKw     token.Pos      // Position of `shared` keyword (zero if absent)
+	SharedFields []*EnumField   // Shared fields lifted onto the enum struct (nil if absent)
+	Variants     []*EnumVariant // Enum variants
+	RBrace       token.Pos      // Position of '}'
+}
+
+// HasSharedFields reports whether the enum uses the shared-fields layout
+// (i.e. lowers to a struct rather than an interface).
+func (e *EnumDecl) HasSharedFields() bool {
+	return len(e.SharedFields) > 0
 }
 
 // Ident represents an identifier
