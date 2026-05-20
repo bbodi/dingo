@@ -50,6 +50,13 @@ var operatorPrecedence = map[tokenizer.TokenKind]int{
 	tokenizer.MINUS: PrecAdditive,   // -
 	tokenizer.STAR:  PrecMultiply,   // *
 	tokenizer.SLASH: PrecMultiply,   // /
+
+	// Bitwise-or. Go puts `|` at additive precedence (same as `+`,`-`).
+	// `|` is ALSO the start of a Rust-style lambda (handled by the prefix
+	// parselet); registering it as infix here only affects positions
+	// after an LHS expression. The prefix parselet still wins when `|`
+	// starts a sub-expression (e.g. as a top-level argument: f(|x| x+1)).
+	tokenizer.PIPE: PrecAdditive, // | (bitwise or)
 }
 
 // PrattParser implements a Pratt parser for expressions
@@ -122,6 +129,7 @@ func NewPrattParser(t *tokenizer.Tokenizer) *PrattParser {
 		tokenizer.OR, tokenizer.AND,
 		tokenizer.EQ, tokenizer.NE, tokenizer.LT, tokenizer.GT, tokenizer.LE, tokenizer.GE,
 		tokenizer.PLUS, tokenizer.MINUS, tokenizer.STAR, tokenizer.SLASH,
+		tokenizer.PIPE, // | (bitwise or) — must coexist with PIPE as a prefix lambda starter
 	}
 	for _, op := range binaryOps {
 		p.registerInfix(op, p.parseBinaryExpr)

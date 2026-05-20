@@ -1298,6 +1298,13 @@ func isStatementStartKeyword(kind tokenizer.TokenKind) bool {
 // isRustLambda checks if the current PIPE token starts a Rust-style lambda |params| body
 // rather than being a bitwise OR operator. It looks ahead to find a closing | before
 // any statement terminator. The tokenizer should be positioned at the opening |.
+//
+// Heuristic: between the opening and closing `|`, only tokens that can appear in a
+// lambda parameter list are allowed. Anything else (a literal, an arithmetic
+// operator, a `.`, a `*` outside a type position …) means this is a bitwise-or
+// chain, not a lambda. Without this check, expressions like `A|B|C` are
+// misinterpreted as `A` followed by `|B|` (a lambda taking parameter `B`) — see
+// pkg/transpiler/bitwise_or_test.go.
 func isRustLambda(tok *tokenizer.Tokenizer, allTokens []tokenizer.Token) bool {
 	// Find current position in allTokens
 	currentPos := tok.Current().Pos
@@ -1312,38 +1319,120 @@ func isRustLambda(tok *tokenizer.Tokenizer, allTokens []tokenizer.Token) bool {
 		return false
 	}
 
-	// Scan forward looking for closing | before statement terminator
-	// Lambda params can contain: IDENT, COMMA, COLON (for type annotation), type names
-	// Statement terminators: SEMICOLON, NEWLINE (at depth 0), LBRACE, RBRACE, EOF
+	// Look back at the previous significant token. If it can produce a
+	// value (an identifier, a literal, or a closing bracket), then this
+	// PIPE is the binary bitwise-or operator, not the opener of a lambda.
+	// A lambda only opens where a value would be expected — after `=`,
+	// `:=`, `(`, `,`, `return`, etc., or at the very start of an
+	// expression. This guards against false positives in chains like
+	// `a|b|c|d` where the finder revisits each `|` separately.
+	for j := startIdx - 1; j >= 0; j-- {
+		switch allTokens[j].Kind {
+		case tokenizer.NEWLINE, tokenizer.SEMICOLON:
+			// Skip insignificant whitespace/separator tokens.
+			continue
+		case tokenizer.IDENT, tokenizer.INT, tokenizer.FLOAT, tokenizer.STRING,
+			tokenizer.CHAR, tokenizer.TRUE, tokenizer.FALSE, tokenizer.NIL,
+			tokenizer.RPAREN, tokenizer.RBRACKET, tokenizer.RBRACE,
+			tokenizer.UNDERSCORE:
+			// Value-producing previous token → this `|` is bitwise-or.
+			return false
+		}
+		break
+	}
+
+	// Scan forward looking for closing | before statement terminator.
+	//
+	// We model the lambda parameter list as a small state machine. Each
+	// parameter entry is `IDENT[: Type]`, separated by commas. The name
+	// slot accepts only an identifier or `_`; the type slot accepts the
+	// usual type-position tokens (`pkg.T`, `*T`, `[]T`, `map[K]V`, etc.).
+	// If we see something that fits neither slot — say, a DOT while we
+	// still expect a parameter name, or a literal anywhere — we know this
+	// PIPE is bitwise-or, not a lambda opener.
+	const (
+		paramSlotName = iota // waiting for an IDENT or `_` (start of an entry)
+		paramSlotAfterName   // saw a name, waiting for `:`, `,`, or closing `|`
+		paramSlotType        // after `:`, scanning the type expression
+	)
 	parenDepth := 0
+	slot := paramSlotName
 	for i := startIdx + 1; i < len(allTokens); i++ {
 		t := allTokens[i]
 
 		switch t.Kind {
 		case tokenizer.PIPE:
-			// Found closing pipe - this is a lambda!
-			// Verify next token could start a body (not another |)
-			if i+1 < len(allTokens) {
-				next := allTokens[i+1]
-				// Body can start with: IDENT, literal, {, (, -, !, etc.
-				if next.Kind != tokenizer.PIPE {
-					return true
-				}
+			if parenDepth > 0 {
+				return false
 			}
-			return true
+			// Closing | only counts as a lambda if we are *between* params:
+			// after the name slot was filled (paramSlotAfterName) or after
+			// a type was scanned (paramSlotType). If we are still expecting
+			// a name (e.g. immediately after the opening |), the empty
+			// param list `||` is also a valid lambda — handle that too.
+			if slot == paramSlotName && i == startIdx+1 {
+				return true // empty params: `||`
+			}
+			return slot != paramSlotName
 
-		case tokenizer.LPAREN:
+		case tokenizer.LPAREN, tokenizer.LBRACKET:
+			// Allow `(...)` and `[...]` inside the type slot of a param
+			// (e.g. `|x: map[K]V|` or `|x: (int, int)|`). Outside a type
+			// slot they cannot legally appear in a param list.
+			if slot != paramSlotType {
+				return false
+			}
 			parenDepth++
 
-		case tokenizer.RPAREN:
+		case tokenizer.RPAREN, tokenizer.RBRACKET:
 			parenDepth--
 			if parenDepth < 0 {
-				// Unmatched ) - not a valid lambda
 				return false
 			}
 
-		case tokenizer.IDENT, tokenizer.COMMA, tokenizer.COLON, tokenizer.UNDERSCORE:
-			// Valid in lambda params, continue
+		case tokenizer.IDENT:
+			switch slot {
+			case paramSlotName:
+				slot = paramSlotAfterName
+			case paramSlotAfterName:
+				// Go-style `x Type` (after TransformSource the colon is
+				// gone) — accept and transition into the type slot.
+				slot = paramSlotType
+			case paramSlotType:
+				// Already inside a type expression; nested ident is fine.
+			}
+
+		case tokenizer.UNDERSCORE:
+			if slot != paramSlotName {
+				return false
+			}
+			slot = paramSlotAfterName
+
+		case tokenizer.COMMA:
+			if parenDepth == 0 {
+				if slot == paramSlotName {
+					return false
+				}
+				slot = paramSlotName
+			}
+
+		case tokenizer.COLON:
+			if slot != paramSlotAfterName {
+				return false
+			}
+			slot = paramSlotType
+
+		case tokenizer.DOT:
+			// Qualified type name like `pkg.T` — only valid in type slot.
+			if slot != paramSlotType {
+				return false
+			}
+
+		case tokenizer.STAR:
+			// Pointer type `*T` — only valid at the start of a type slot.
+			if slot != paramSlotType {
+				return false
+			}
 
 		case tokenizer.SEMICOLON, tokenizer.LBRACE, tokenizer.RBRACE, tokenizer.EOF:
 			// Statement terminator before finding closing | - this is bitwise OR
@@ -1357,6 +1446,12 @@ func isRustLambda(tok *tokenizer.Tokenizer, allTokens []tokenizer.Token) bool {
 
 		case tokenizer.ASSIGN, tokenizer.DEFINE:
 			// Assignment operators - not valid in lambda params
+			return false
+
+		case tokenizer.INT, tokenizer.FLOAT, tokenizer.STRING, tokenizer.CHAR,
+			tokenizer.TRUE, tokenizer.FALSE, tokenizer.NIL:
+			// A literal between the two pipes cannot be a parameter name
+			// or a type — this is a bitwise-or chain like `1 | 2 | 4`.
 			return false
 
 		default:
