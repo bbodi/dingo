@@ -264,6 +264,18 @@ func transformTupleLiterals(src []byte) ([]byte, error) {
 				continue
 			}
 
+			// Skip if this is a grouped declaration: `var (`, `const (`,
+			// `import (`, or `type (`. The body is a sequence of
+			// independent declarations; commas inside (e.g. between the
+			// fields of a composite-literal initialiser) belong to that
+			// inner literal, not to a tuple-element separator.
+			if prevToken.Kind == tokenizer.VAR || prevToken.Kind == tokenizer.CONST ||
+				prevToken.Kind == tokenizer.IMPORT || prevToken.Kind == tokenizer.TYPE {
+				prevPrevToken = prevToken
+				prevToken = t
+				continue
+			}
+
 			// Skip if this is a type alias context (handled by transformTupleTypeAliases)
 			// Pattern: type X = ( → already handled
 			if prevToken.Kind == tokenizer.ASSIGN && prevPrevToken.Kind == tokenizer.IDENT {
