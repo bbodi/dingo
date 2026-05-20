@@ -105,6 +105,92 @@ func FindDingoExpressions(src []byte) ([]ExprLocation, error) {
 
 		// Match expression
 		if current.Kind == tokenizer.MATCH {
+			// Context check: `match` is also a perfectly valid Go
+			// identifier, and codebases like the Go compiler use it
+			// as a method or function name. Skip the MATCH token in
+			// positions that can only be an identifier:
+			//   - `x.match(...)` — selector before, so this is a
+			//     method call. Previous significant token is `.`.
+			//   - `func match(...)` — function decl. Previous is FUNC.
+			//   - `func (r T) match(...)` — method decl, where the
+			//     receiver list closes with `)`. Previous is RPAREN.
+			// In all three cases, treating MATCH as a keyword would
+			// later fail to find the `{ arms }` body and abort the
+			// transpile with an `expected '{'` / `unmatched closing
+			// brace` error.
+			currentIdx := -1
+			for i, t := range allTokens {
+				if t.BytePos() == current.BytePos() {
+					currentIdx = i
+					break
+				}
+			}
+			if currentIdx > 0 {
+				skip := false
+				for j := currentIdx - 1; j >= 0; j-- {
+					switch allTokens[j].Kind {
+					case tokenizer.NEWLINE, tokenizer.SEMICOLON, tokenizer.COMMENT:
+						continue
+					case tokenizer.DOT, tokenizer.FUNC, tokenizer.RPAREN:
+						skip = true
+					}
+					break
+				}
+				if skip {
+					tok.Advance()
+					continue
+				}
+			}
+
+			// Forward lookahead: a match expression must have a `{` at
+			// outer paren-depth before a statement terminator. A bare
+			// `match(args)` call won't (the `(` opens depth 1, the `)`
+			// closes it, and what follows is some other expression or
+			// statement boundary). Without this check, the Go compiler's
+			// standalone calls like `_ = match(7)` would be mis-parsed
+			// here and abort the whole transpile with
+			// `unmatched closing brace in match expression`.
+			if currentIdx >= 0 {
+				looksLikeMatch := false
+				parenD, brackD := 0, 0
+			scan:
+				for j := currentIdx + 1; j < len(allTokens); j++ {
+					switch allTokens[j].Kind {
+					case tokenizer.LPAREN:
+						parenD++
+					case tokenizer.RPAREN:
+						parenD--
+						if parenD < 0 {
+							break scan
+						}
+					case tokenizer.LBRACKET:
+						brackD++
+					case tokenizer.RBRACKET:
+						brackD--
+						if brackD < 0 {
+							break scan
+						}
+					case tokenizer.LBRACE:
+						if parenD == 0 && brackD == 0 {
+							looksLikeMatch = true
+						}
+						break scan
+					case tokenizer.RBRACE:
+						if parenD == 0 && brackD == 0 {
+							break scan
+						}
+					case tokenizer.SEMICOLON, tokenizer.EOF:
+						if parenD == 0 && brackD == 0 {
+							break scan
+						}
+					}
+				}
+				if !looksLikeMatch {
+					tok.Advance()
+					continue
+				}
+			}
+
 			start := current.BytePos()
 			tok.Advance() // consume 'match'
 

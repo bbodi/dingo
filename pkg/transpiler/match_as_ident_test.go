@@ -1,0 +1,114 @@
+package transpiler
+
+import (
+	"strings"
+	"testing"
+)
+
+// match_as_ident_test.go — regression tests for the expression finder
+// treating every `match` token as a match-expression keyword, even
+// when it appears in identifier position (method call, function name,
+// method declaration).
+//
+// Background: Dingo's tokenizer maps the word `match` to a hard
+// keyword token (MATCH). The expression finder scans for MATCH and
+// tries to parse a `match scrutinee { arms }` expression at every
+// occurrence. Real Go code that names a function or method `match`
+// (the Go compiler's `cmd/compile/internal/base.HashDebug.match` and
+// many similar) then trips the finder, which fails with
+// `expected next token to be {` or similar downstream parse errors.
+//
+// The fix is contextual: skip MATCH when it sits in a position that
+// can only be an identifier — preceded by `.` (selector), `func`
+// (declaration), or `)` (method-of-receiver declaration).
+
+func TestMatchIdent_MethodCall(t *testing.T) {
+	src := `package x
+
+type D struct{}
+func (d *D) match(h int) *int { return nil }
+
+func (d *D) f(hash int) bool {
+	if m := d.match(hash); m != nil {
+		return true
+	}
+	return false
+}
+`
+	out, err := PureASTTranspile([]byte(src), "")
+	if err != nil {
+		t.Fatalf("transpile failed: %v", err)
+	}
+	if !strings.Contains(string(out), "d.match(hash)") {
+		t.Errorf("method call corrupted.\n%s", out)
+	}
+}
+
+func TestMatchIdent_FuncDecl(t *testing.T) {
+	// Standalone `func match(...)` — the `match` is a function name.
+	src := `package x
+
+func match(h int) *int { return nil }
+
+func use() {
+	_ = match(7)
+}
+`
+	out, err := PureASTTranspile([]byte(src), "")
+	if err != nil {
+		t.Fatalf("transpile failed: %v", err)
+	}
+	if !strings.Contains(string(out), "func match(") {
+		t.Errorf("function decl named `match` corrupted.\n%s", out)
+	}
+	if !strings.Contains(string(out), "match(7)") {
+		t.Errorf("call to `match` corrupted.\n%s", out)
+	}
+}
+
+func TestMatchIdent_MethodDecl(t *testing.T) {
+	// `func (d *D) match(...)` — `match` is a method name following the
+	// receiver list's closing `)`.
+	src := `package x
+
+type D struct{}
+func (d *D) match(h int) bool { return h > 0 }
+
+func use(d *D) { _ = d.match(1) }
+`
+	out, err := PureASTTranspile([]byte(src), "")
+	if err != nil {
+		t.Fatalf("transpile failed: %v", err)
+	}
+	if !strings.Contains(string(out), ") match(") {
+		t.Errorf("method decl named `match` corrupted.\n%s", out)
+	}
+}
+
+func TestMatchExpr_StillWorks(t *testing.T) {
+	// Regression guard: ordinary match expressions must still be
+	// recognised. The context skip must not be too greedy.
+	src := `package x
+
+type Color interface{ isColor() }
+type Red struct{}
+func (Red) isColor() {}
+type Blue struct{}
+func (Blue) isColor() {}
+
+func name(c Color) string {
+	return match c {
+		Red => "red",
+		Blue => "blue",
+	}
+}
+`
+	out, err := PureASTTranspile([]byte(src), "")
+	if err != nil {
+		t.Fatalf("transpile failed: %v", err)
+	}
+	// A real match expression lowers to a Go type switch.
+	if !strings.Contains(string(out), ".(type)") {
+		t.Errorf("match expression no longer lowered to type switch.\n%s", out)
+	}
+}
