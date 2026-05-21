@@ -2,6 +2,8 @@ package codegen
 
 import (
 	"fmt"
+	"go/scanner"
+	"go/token"
 	"strings"
 
 	"github.com/MadAppGang/dingo/pkg/ast"
@@ -129,18 +131,27 @@ func (g *MatchCodeGen) emitSharedFieldsSwitch(enumName string) {
 	}
 }
 
+// refBinding describes a `&X`-pattern binding: the user-facing name X and
+// the Go expression that refers in-place to the underlying variant field.
+// emitArmBody substitutes the name with the field-access expression in the
+// arm body so that `X = ...` writes through to the variant data.
+type refBinding struct {
+	name        string // binding identifier as written in the pattern
+	fieldAccess string // e.g. "d1.X" — token-substituted into the body
+}
+
 // emitSharedFieldsArm writes one `case` clause (or `default`) for a single
 // match arm.
 func (g *MatchCodeGen) emitSharedFieldsArm(enumName, scrutVar string, arm *ast.MatchArm) {
 	switch pat := arm.Pattern.(type) {
 	case *ast.ConstructorPattern:
 		g.Write(fmt.Sprintf("case %sTag%s:\n", enumName, pat.Name))
-		g.emitSharedFieldsBindings(enumName, scrutVar, pat)
-		g.emitArmBody(arm)
+		refs := g.emitSharedFieldsBindings(enumName, scrutVar, pat)
+		g.emitArmBody(arm, refs)
 
 	case *ast.WildcardPattern:
 		g.Write("default:\n")
-		g.emitArmBody(arm)
+		g.emitArmBody(arm, nil)
 
 	case *ast.VariablePattern:
 		// `x => ...` rebinds the whole scrutinee. With shared-fields
@@ -148,7 +159,7 @@ func (g *MatchCodeGen) emitSharedFieldsArm(enumName, scrutVar string, arm *ast.M
 		g.Write("default:\n")
 		g.Write(fmt.Sprintf("%s := %s\n", pat.Name, scrutVar))
 		_ = pat
-		g.emitArmBody(arm)
+		g.emitArmBody(arm, nil)
 
 	case *ast.LiteralPattern:
 		// Literals don't make sense for a sum-type tag dispatch.
@@ -172,41 +183,45 @@ func (g *MatchCodeGen) emitSharedFieldsArm(enumName, scrutVar string, arm *ast.M
 // If the pattern has no bindings, only `_ = scrut.data` is emitted so
 // the unused-var lint is satisfied (and a future-proofing in case the
 // arm body needs the data — currently we just skip).
-func (g *MatchCodeGen) emitSharedFieldsBindings(enumName, scrutVar string, pat *ast.ConstructorPattern) {
+func (g *MatchCodeGen) emitSharedFieldsBindings(enumName, scrutVar string, pat *ast.ConstructorPattern) []refBinding {
 	if len(pat.Params) == 0 {
-		return
+		return nil
 	}
 
-	// patternBindingName extracts the binding name for a single param in a
-	// constructor pattern. Both VariablePattern and *nullary*
-	// ConstructorPattern act as named bindings — the latter happens when
-	// the Pratt parser treats an uppercase identifier inside a constructor
-	// pattern's params as a nullary constructor (its uppercase-heuristic
-	// in isNullaryConstructor). For matching named-struct variants, that
-	// identifier IS just the (uppercase) binding name. Wildcards and
-	// literals don't bind.
-	bindingName := func(p ast.Pattern) (string, bool) {
+	// patternBinding extracts the binding name AND its ByRef flag for a
+	// single param in a constructor pattern. Both VariablePattern and
+	// *nullary* ConstructorPattern act as named bindings — the latter
+	// happens when the Pratt parser treats an uppercase identifier inside
+	// a constructor pattern's params as a nullary constructor (its
+	// uppercase-heuristic in isNullaryConstructor). For matching named-
+	// struct variants, that identifier IS just the (uppercase) binding
+	// name. Wildcards and literals don't bind.
+	type binding struct {
+		name  string
+		byRef bool
+	}
+	patternBinding := func(p ast.Pattern) (binding, bool) {
 		switch v := p.(type) {
 		case *ast.VariablePattern:
-			return v.Name, true
+			return binding{name: v.Name, byRef: v.ByRef}, true
 		case *ast.ConstructorPattern:
 			if len(v.Params) == 0 {
-				return v.Name, true
+				return binding{name: v.Name, byRef: v.ByRef}, true
 			}
 		}
-		return "", false
+		return binding{}, false
 	}
 
 	// Determine which params actually produce bindings.
 	hasBinding := false
 	for _, p := range pat.Params {
-		if _, ok := bindingName(p); ok {
+		if _, ok := patternBinding(p); ok {
 			hasBinding = true
 			break
 		}
 	}
 	if !hasBinding {
-		return
+		return nil
 	}
 
 	// Emit the cast.
@@ -214,14 +229,20 @@ func (g *MatchCodeGen) emitSharedFieldsBindings(enumName, scrutVar string, pat *
 	dataVar := g.SharedTempVar("d")
 	g.Write(fmt.Sprintf("%s := %s.data.(%s)\n", dataVar, scrutVar, dataStruct))
 
-	// Bindings: for each param that names a binding, emit
-	// `<name> := <dataVar>.<FieldName>`. For named struct variants the
-	// field name is the binding's own name; for tuple variants we fall
-	// back to Value/Value0/.... Pattern is identical to the classic
-	// codegen's extractBindings, but we re-derive it here because we
-	// don't have the parent type-switch's `v` variable.
+	// Bindings:
+	//
+	//   - By-VALUE (default): emit `<name> := <dataVar>.<FieldName>` so the
+	//     arm body sees a local copy. Assignment to <name> only writes the
+	//     local — the variant data is untouched.
+	//   - By-REFERENCE (`&<name>`): do NOT emit a binding line. Instead,
+	//     collect the (name → fieldAccess) pair so emitArmBody can
+	//     token-substitute the identifier in the arm body to refer to
+	//     `<dataVar>.<FieldName>` directly. That way `X = expr` in the body
+	//     becomes `<dataVar>.X = expr` in the generated Go, mutating the
+	//     variant data in place.
+	var refs []refBinding
 	for _, param := range pat.Params {
-		name, ok := bindingName(param)
+		b, ok := patternBinding(param)
 		if !ok {
 			continue
 		}
@@ -229,8 +250,21 @@ func (g *MatchCodeGen) emitSharedFieldsBindings(enumName, scrutVar string, pat *
 		// metadata here to detect that. Default to the binding name
 		// (struct-variant convention), which is what Option B enums
 		// will produce in practice.
-		g.Write(fmt.Sprintf("%s := %s.%s\n", name, dataVar, name))
+		fieldAccess := fmt.Sprintf("%s.%s", dataVar, b.name)
+		if b.byRef {
+			refs = append(refs, refBinding{name: b.name, fieldAccess: fieldAccess})
+			continue
+		}
+		g.Write(fmt.Sprintf("%s := %s\n", b.name, fieldAccess))
 	}
+	if len(refs) > 0 {
+		// Suppress the unused-var lint on dataVar when ONLY by-ref bindings
+		// are present — by-value bindings already reference dataVar, but
+		// the substituted body might not retain the original token form
+		// for the linter to count. Cheap insurance:
+		g.Write(fmt.Sprintf("_ = %s\n", dataVar))
+	}
+	return refs
 }
 
 // isTerminatingExpr reports whether the generated Go expression is one of
@@ -252,31 +286,88 @@ func isTerminatingExpr(goExprSrc string) bool {
 // matches inline it. Guards are wrapped in an if-block. Re-implemented
 // here (rather than calling generateArmBody) to avoid relying on the
 // `scrutineeTempVar` / `Binding` plumbing used by the type-switch path.
-func (g *MatchCodeGen) emitArmBody(arm *ast.MatchArm) {
+//
+// refs is the list of by-reference bindings collected from the arm's
+// pattern. For each ref binding the function token-substitutes the
+// binding identifier with the underlying field-access expression
+// (e.g. `d1.X`) before emitting the body, so user-written `X = expr`
+// becomes `d1.X = expr` in the generated Go and mutates the variant
+// data in place.
+func (g *MatchCodeGen) emitArmBody(arm *ast.MatchArm, refs []refBinding) {
 	if arm.Guard != nil {
 		guard := GenerateExpr(arm.Guard)
 		g.Write(fmt.Sprintf("if %s {\n", string(guard.Output)))
 	}
 
 	body := GenerateExpr(arm.Body)
+	output := body.Output
+	for _, r := range refs {
+		output = substituteIdentBytes(output, r.name, r.fieldAccess)
+	}
 	_, isReturnExpr := arm.Body.(*ast.ReturnExpr)
-	bodyStr := string(body.Output)
+	bodyStr := string(output)
 	if g.Match.IsExpr && !isReturnExpr {
 		// `panic(...)` terminates the function and has type bottom; Go does
 		// not allow `return panic(...)`. Emit the panic as a bare statement
 		// instead — control never falls through.
 		if isTerminatingExpr(bodyStr) {
-			g.Buf.Write(body.Output)
+			g.Buf.Write(output)
 			g.WriteByte('\n')
 		} else {
 			g.Write(fmt.Sprintf("return %s\n", bodyStr))
 		}
 	} else {
-		g.Buf.Write(body.Output)
+		g.Buf.Write(output)
 		g.WriteByte('\n')
 	}
 
 	if arm.Guard != nil {
 		g.Write("}\n")
 	}
+}
+
+// substituteIdentBytes token-aware-rewrites every IDENT-context occurrence
+// of oldIdent in src to newExpr. Only complete identifier tokens are
+// matched; the function never rewrites a substring that happens to appear
+// inside a longer identifier, string, or comment.
+//
+// Used by emitArmBody to swap `&`-bound pattern names with their in-place
+// field-access expressions. Falls back to the original bytes if the source
+// can't be tokenised (e.g. it carried a non-Go syntax fragment).
+func substituteIdentBytes(src []byte, oldIdent, newExpr string) []byte {
+	if !strings.Contains(string(src), oldIdent) {
+		return src
+	}
+	var s scanner.Scanner
+	fset := token.NewFileSet()
+	file := fset.AddFile("", fset.Base(), len(src))
+	s.Init(file, src, nil, scanner.ScanComments)
+
+	type span struct{ start, end int }
+	var hits []span
+	for {
+		pos, tok, lit := s.Scan()
+		if tok == token.EOF {
+			break
+		}
+		if tok != token.IDENT || lit != oldIdent {
+			continue
+		}
+		start := fset.Position(pos).Offset
+		end := start + len(lit)
+		hits = append(hits, span{start, end})
+	}
+	if len(hits) == 0 {
+		return src
+	}
+
+	result := make([]byte, 0, len(src)+len(hits)*len(newExpr))
+	cursor := 0
+	for _, h := range hits {
+		result = append(result, src[cursor:h.start]...)
+		result = append(result, newExpr...)
+		cursor = h.end
+	}
+	result = append(result, src[cursor:]...)
+	return result
 }

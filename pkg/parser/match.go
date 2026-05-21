@@ -246,6 +246,47 @@ func (p *PrattParser) parsePattern() ast.Pattern {
 			Kind:     ast.BoolLiteral,
 		}
 
+	case tokenizer.AMPERSAND:
+		// `&IDENT` — mutable (in-place reference) binding inside a
+		// constructor pattern's params, e.g. BinaryExpr(&X, &Y).
+		// Assignments to X in the arm body mutate the underlying variant
+		// data instead of writing to a local copy.
+		p.nextToken() // consume '&'
+		ident := p.curToken
+		if ident.Kind != tokenizer.IDENT {
+			p.errors = append(p.errors, ParseError{
+				Pos:     ident.Pos,
+				Line:    ident.Line,
+				Column:  ident.Column,
+				Message: fmt.Sprintf("expected identifier after `&` in pattern, got %s", ident.Kind),
+			})
+			return nil
+		}
+		// `&IDENT(...)` or `&IDENT{...}` is invalid — references only bind
+		// to a single field, not nested patterns.
+		if p.peekTokenIs(tokenizer.LPAREN) || p.peekTokenIs(tokenizer.LBRACE) {
+			p.errors = append(p.errors, ParseError{
+				Pos:     ident.Pos,
+				Line:    ident.Line,
+				Column:  ident.Column,
+				Message: "`&` may only precede a binding name in patterns",
+			})
+			return nil
+		}
+		if isNullaryConstructor(ident.Lit) {
+			return &ast.ConstructorPattern{
+				NamePos: ident.Pos,
+				Name:    ident.Lit,
+				Params:  nil,
+				ByRef:   true,
+			}
+		}
+		return &ast.VariablePattern{
+			NamePos: ident.Pos,
+			Name:    ident.Lit,
+			ByRef:   true,
+		}
+
 	case tokenizer.IDENT:
 		// Could be: variable, constructor (with parens/braces), or enum variant
 		ident := tok

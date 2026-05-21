@@ -224,6 +224,39 @@ func (p *MatchParser) parsePattern() (ast.Pattern, error) {
 			Kind:     literalKindFromToken(tok.Kind),
 		}, nil
 
+	case tokenizer.AMPERSAND:
+		// `&IDENT` — mutable (in-place reference) binding inside a
+		// constructor pattern's params, e.g. BinaryExpr(&X, &Y) =>
+		// assignments to X in the arm body mutate the underlying variant
+		// data instead of writing to a local copy.
+		p.tok.Advance()
+		ident := p.tok.Current()
+		if ident.Kind != tokenizer.IDENT {
+			return nil, fmt.Errorf("expected identifier after `&` in pattern at line %d, got %s", ident.Line, ident.Kind)
+		}
+		p.tok.Advance()
+		// `&IDENT(` or `&IDENT{` is invalid — references only bind to a
+		// single field, not nested patterns.
+		if p.tok.Current().Kind == tokenizer.LPAREN || p.tok.Current().Kind == tokenizer.LBRACE {
+			return nil, fmt.Errorf("`&` may only precede a binding name in patterns at line %d", ident.Line)
+		}
+		// Uppercase first char → represented as a nullary ConstructorPattern
+		// (matching how the Pratt parser's isNullaryConstructor heuristic
+		// would treat the same identifier). Lowercase → VariablePattern.
+		if isNullaryConstructor(ident.Lit) {
+			return &ast.ConstructorPattern{
+				NamePos: ident.Pos,
+				Name:    ident.Lit,
+				Params:  nil,
+				ByRef:   true,
+			}, nil
+		}
+		return &ast.VariablePattern{
+			NamePos: ident.Pos,
+			Name:    ident.Lit,
+			ByRef:   true,
+		}, nil
+
 	case tokenizer.IDENT:
 		// Could be: variable, constructor (with parens/braces), or enum variant
 		ident := tok

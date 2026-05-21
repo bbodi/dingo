@@ -82,13 +82,19 @@ type Binding struct {
 }
 
 // ConstructorPattern represents: Ok(x), Err(e), Some(v), None, EnumName_Variant(x)
-// CRITICAL: Supports nested patterns in Params
+// CRITICAL: Supports nested patterns in Params.
+//
+// When ByRef is true, this nullary ConstructorPattern was written as `&X`
+// inside another pattern's params and binds X to an in-place reference to
+// the underlying variant field. See the VariablePattern.ByRef comment for
+// the mutation semantics.
 type ConstructorPattern struct {
 	NamePos token.Pos // Position of constructor name
 	Name    string    // Constructor name (Ok, Err, Some, None, or qualified)
 	LParen  token.Pos // Position of '(' (zero if no params)
 	Params  []Pattern // CHANGED: Pattern instead of string (enables nesting!)
 	RParen  token.Pos // Position of ')' (zero if no params)
+	ByRef   bool      // True when written as `&X` and producing an in-place reference binding
 }
 
 func (p *ConstructorPattern) PatternNode() {}
@@ -172,10 +178,18 @@ func (p *TuplePattern) GetBindings() []Binding {
 	return bindings
 }
 
-// VariablePattern represents: x, value (binding patterns)
+// VariablePattern represents: x, value (binding patterns).
+//
+// When ByRef is true, the binding was written with a leading `&` (e.g.
+// `Variant(&X, &Y)`). Shared-fields enum match codegen emits these as
+// in-place field references: assignments to X in the arm body mutate the
+// underlying variant data instead of writing to a local copy. By-value
+// bindings (ByRef=false) remain the default and produce a `X := d.X`
+// local copy as before.
 type VariablePattern struct {
 	NamePos token.Pos
 	Name    string
+	ByRef   bool
 }
 
 func (p *VariablePattern) PatternNode() {}
