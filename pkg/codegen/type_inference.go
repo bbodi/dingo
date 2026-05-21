@@ -807,8 +807,21 @@ func findEnclosingFunctionFallback(src []byte, exprPos int) *ast.FuncDecl {
 		pos        int
 		isNamed    bool // true if it's a named function (declaration)
 		braceDepth int  // brace depth at the point the FUNC token was seen
+		hasBody    bool // true once we see the body LBRACE that opens this func
 	}
 	var funcs []funcInfo
+
+	// pendingFuncs is a stack of indices into funcs[] for FUNC tokens whose
+	// signature is still being parsed. The top entry is committed (hasBody=true)
+	// when we see an LBRACE at its expected paren depth; it is popped when its
+	// signature ends without a body (function-TYPE positions like
+	// `lookup func(p string) error` as a parameter).
+	type pendingFunc struct {
+		idx        int // index into funcs[]
+		parenDepth int // paren depth right after we saw FUNC (before any LPAREN of the signature)
+	}
+	var pending []pendingFunc
+	var parenDepth int
 
 	s.Init(file, src, nil, 0)
 
@@ -827,11 +840,50 @@ func findEnclosingFunctionFallback(src []byte, exprPos int) *ast.FuncDecl {
 			braceDepthAtExpr = braceDepth
 			break
 		}
+		// Update paren depth (used to detect when a pending FUNC's signature
+		// ends — i.e., a function-type position with no body).
+		if tok == token.LPAREN {
+			parenDepth++
+		} else if tok == token.RPAREN {
+			parenDepth--
+			// If a pending FUNC's signature just closed (paren depth back to its
+			// starting depth) and the next meaningful token is not LBRACE, the FUNC
+			// is a TYPE, not a literal. We handle the "not LBRACE" detection in the
+			// COMMA / RPAREN / RBRACE arms below.
+		}
 		// Update brace depth before recording per-token state
 		if tok == token.LBRACE {
 			braceDepth++
+			// If the most recent pending FUNC's signature has closed (parenDepth ==
+			// its recorded depth), this LBRACE opens its body. Commit it.
+			if n := len(pending); n > 0 && parenDepth == pending[n-1].parenDepth {
+				funcs[pending[n-1].idx].hasBody = true
+				pending = pending[:n-1]
+			}
 		} else if tok == token.RBRACE {
 			braceDepth--
+		}
+		// If we hit a COMMA or RPAREN at the same paren depth as a pending FUNC's
+		// signature opening, the FUNC is a type position (parameter, return type,
+		// struct field, etc.) — drop it from the pending stack and from funcs[].
+		if tok == token.COMMA || tok == token.RPAREN {
+			for n := len(pending); n > 0; n = len(pending) {
+				p := pending[n-1]
+				// A FUNC signature has finished if our current parenDepth is at or
+				// below the depth recorded for it. RPAREN above already decremented.
+				if parenDepth >= p.parenDepth {
+					break
+				}
+				// Drop the type-only FUNC
+				funcs = append(funcs[:p.idx], funcs[p.idx+1:]...)
+				pending = pending[:n-1]
+				// Adjust indices of any remaining pending entries above p.idx.
+				for j := range pending {
+					if pending[j].idx > p.idx {
+						pending[j].idx--
+					}
+				}
+			}
 		}
 		if lastTok == token.FUNC && tok == token.IDENT {
 			// Previous token was FUNC, this is a name → function declaration (no receiver)
@@ -851,6 +903,7 @@ func findEnclosingFunctionFallback(src []byte, exprPos int) *ast.FuncDecl {
 		}
 		if tok == token.FUNC {
 			funcs = append(funcs, funcInfo{pos: offset, isNamed: false, braceDepth: braceDepth})
+			pending = append(pending, pendingFunc{idx: len(funcs) - 1, parenDepth: parenDepth})
 			afterFuncSawReceiver = false
 		}
 		lastTok = tok
@@ -860,12 +913,18 @@ func findEnclosingFunctionFallback(src []byte, exprPos int) *ast.FuncDecl {
 		return nil
 	}
 
-	// Find the innermost enclosing function: the last FUNC whose brace depth at the
-	// time it was seen is less than braceDepthAtExpr. This means its body is still
+	// Find the innermost enclosing function: the last FUNC whose body has been
+	// opened (an LBRACE matched its signature) and whose brace depth at the time
+	// it was seen is less than braceDepthAtExpr. This means its body is still
 	// open at exprPos, and works for both named functions and anonymous closures.
+	// FUNCs without a body (function-TYPE positions like `func(string) error` as
+	// a parameter type) are skipped — they don't enclose any executable code.
 	var lastFunc int = -1
 	var lastFuncIsNamed bool
 	for i := len(funcs) - 1; i >= 0; i-- {
+		if !funcs[i].hasBody {
+			continue
+		}
 		if funcs[i].braceDepth < braceDepthAtExpr {
 			lastFunc = funcs[i].pos
 			lastFuncIsNamed = funcs[i].isNamed
@@ -874,9 +933,17 @@ func findEnclosingFunctionFallback(src []byte, exprPos int) *ast.FuncDecl {
 	}
 
 	if lastFunc == -1 {
-		// No function found via brace depth; fall back to last entry
-		lastFunc = funcs[len(funcs)-1].pos
-		lastFuncIsNamed = funcs[len(funcs)-1].isNamed
+		// No function found via brace depth; fall back to last entry with a body.
+		for i := len(funcs) - 1; i >= 0; i-- {
+			if funcs[i].hasBody {
+				lastFunc = funcs[i].pos
+				lastFuncIsNamed = funcs[i].isNamed
+				break
+			}
+		}
+	}
+	if lastFunc == -1 {
+		return nil
 	}
 
 	// For anonymous functions (closures), we know they have no return types
