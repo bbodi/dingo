@@ -255,7 +255,7 @@ func transformTupleLiterals(src []byte) ([]byte, error) {
 			// `go func(){...}()`). In Go, `}(` is only ever a call site.
 			if prevToken.Kind == tokenizer.IDENT || prevToken.Kind == tokenizer.RPAREN ||
 				prevToken.Kind == tokenizer.FUNC || prevToken.Kind == tokenizer.RBRACKET ||
-				prevToken.Kind == tokenizer.RBRACE {
+				prevToken.Kind == tokenizer.RBRACE || prevToken.Kind == tokenizer.MATCH {
 				prevPrevToken = prevToken
 				prevToken = t
 				continue

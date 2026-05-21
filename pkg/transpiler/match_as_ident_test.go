@@ -140,6 +140,35 @@ func f(b bool) int {
 	}
 }
 
+func TestMatchIdent_LocalLambdaCall(t *testing.T) {
+	// `match` as a local variable bound to a lambda, called with
+	// positional args. The Go compiler's ssa/_gen/rulegen.go does
+	// exactly this: `match := func(x opData, strict bool, archname
+	// string) bool { ... }` followed by `match(x, true, "generic")`.
+	//
+	// Before the fix, the tuple-literal pre-pass would treat
+	// `(x, true, "generic")` as a 3-tuple because the preceding
+	// token kind was MATCH rather than IDENT, producing the broken
+	// output `match__tuple3__(x, true, "generic")`.
+	src := `package x
+
+func use() bool {
+	match := func(a int, b bool, c string) bool { return b }
+	return match(1, true, "hi")
+}
+`
+	out, err := PureASTTranspile([]byte(src), "")
+	if err != nil {
+		t.Fatalf("transpile failed: %v", err)
+	}
+	if !strings.Contains(string(out), `match(1, true, "hi")`) {
+		t.Errorf("call to local match var corrupted.\n%s", out)
+	}
+	if strings.Contains(string(out), "match__tuple") {
+		t.Errorf("tuple-literal pass clobbered the call.\n%s", out)
+	}
+}
+
 func TestMatchExpr_StillWorks(t *testing.T) {
 	// Regression guard: ordinary match expressions must still be
 	// recognised. The context skip must not be too greedy.
