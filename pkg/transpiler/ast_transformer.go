@@ -1232,12 +1232,19 @@ func generateTupleErrorPropStatement(expr []byte, varName string, returnTypes []
 	// For tuple LHS, variables are already assigned (fullKey, keyHash, err := expr)
 	// For single LHS with plain assign (named return), variables are also already assigned (varName, err = expr)
 	// For single LHS with define, we need: varName := tmp
+	// For single LHS with plain assign but no named error return (e.g. plain `=`
+	// assigning to a var declared above), we must NOT shadow the outer variable —
+	// emit `varName = tmp` to assign through to it.
 	if !isTupleLHS && !(isPlainAssign && namedErrVar != "") {
 		buf.WriteString("\n}\n")
 		buf.WriteString(varName)
-		if varName == "_" {
+		switch {
+		case varName == "_":
 			buf.WriteString(" = ")
-		} else {
+		case isPlainAssign:
+			// User wrote `varName = expr?` → varName already exists; use plain assignment.
+			buf.WriteString(" = ")
+		default:
 			buf.WriteString(" := ")
 		}
 		buf.WriteString(tmpVar)
