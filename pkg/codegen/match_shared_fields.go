@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/MadAppGang/dingo/pkg/ast"
 )
@@ -232,6 +233,20 @@ func (g *MatchCodeGen) emitSharedFieldsBindings(enumName, scrutVar string, pat *
 	}
 }
 
+// isTerminatingExpr reports whether the generated Go expression is one of
+// Go's terminating builtins/keywords — `panic(...)` and the obsolete `goto`
+// — which never produce a value and cannot legally appear in a `return X`
+// context. Such expressions must be emitted as bare statements instead.
+//
+// Conservative: only matches the literal prefix `panic(`. Wrapping the
+// panic in any extra expression (e.g. `foo(panic(...))`) is treated as a
+// normal value-producing call. That's the right call because Go's static
+// type system already rejects those.
+func isTerminatingExpr(goExprSrc string) bool {
+	s := strings.TrimSpace(goExprSrc)
+	return strings.HasPrefix(s, "panic(")
+}
+
 // emitArmBody writes the body of an arm. Mirrors the classic codegen's
 // per-arm body emission: expression matches return the body; statement
 // matches inline it. Guards are wrapped in an if-block. Re-implemented
@@ -245,8 +260,17 @@ func (g *MatchCodeGen) emitArmBody(arm *ast.MatchArm) {
 
 	body := GenerateExpr(arm.Body)
 	_, isReturnExpr := arm.Body.(*ast.ReturnExpr)
+	bodyStr := string(body.Output)
 	if g.Match.IsExpr && !isReturnExpr {
-		g.Write(fmt.Sprintf("return %s\n", string(body.Output)))
+		// `panic(...)` terminates the function and has type bottom; Go does
+		// not allow `return panic(...)`. Emit the panic as a bare statement
+		// instead — control never falls through.
+		if isTerminatingExpr(bodyStr) {
+			g.Buf.Write(body.Output)
+			g.WriteByte('\n')
+		} else {
+			g.Write(fmt.Sprintf("return %s\n", bodyStr))
+		}
 	} else {
 		g.Buf.Write(body.Output)
 		g.WriteByte('\n')
