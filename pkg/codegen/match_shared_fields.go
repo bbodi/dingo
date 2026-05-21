@@ -176,13 +176,32 @@ func (g *MatchCodeGen) emitSharedFieldsBindings(enumName, scrutVar string, pat *
 		return
 	}
 
-	// Determine which params actually produce bindings. Wildcards and
-	// literals don't.
+	// patternBindingName extracts the binding name for a single param in a
+	// constructor pattern. Both VariablePattern and *nullary*
+	// ConstructorPattern act as named bindings — the latter happens when
+	// the Pratt parser treats an uppercase identifier inside a constructor
+	// pattern's params as a nullary constructor (its uppercase-heuristic
+	// in isNullaryConstructor). For matching named-struct variants, that
+	// identifier IS just the (uppercase) binding name. Wildcards and
+	// literals don't bind.
+	bindingName := func(p ast.Pattern) (string, bool) {
+		switch v := p.(type) {
+		case *ast.VariablePattern:
+			return v.Name, true
+		case *ast.ConstructorPattern:
+			if len(v.Params) == 0 {
+				return v.Name, true
+			}
+		}
+		return "", false
+	}
+
+	// Determine which params actually produce bindings.
 	hasBinding := false
 	for _, p := range pat.Params {
-		switch p.(type) {
-		case *ast.VariablePattern, *ast.ConstructorPattern:
+		if _, ok := bindingName(p); ok {
 			hasBinding = true
+			break
 		}
 	}
 	if !hasBinding {
@@ -194,24 +213,22 @@ func (g *MatchCodeGen) emitSharedFieldsBindings(enumName, scrutVar string, pat *
 	dataVar := g.SharedTempVar("d")
 	g.Write(fmt.Sprintf("%s := %s.data.(%s)\n", dataVar, scrutVar, dataStruct))
 
-	// Bindings: for each param that is a VariablePattern, emit
+	// Bindings: for each param that names a binding, emit
 	// `<name> := <dataVar>.<FieldName>`. For named struct variants the
 	// field name is the binding's own name; for tuple variants we fall
 	// back to Value/Value0/.... Pattern is identical to the classic
 	// codegen's extractBindings, but we re-derive it here because we
 	// don't have the parent type-switch's `v` variable.
-	for i, param := range pat.Params {
-		vp, ok := param.(*ast.VariablePattern)
+	for _, param := range pat.Params {
+		name, ok := bindingName(param)
 		if !ok {
 			continue
 		}
-		fieldName := vp.Name
 		// Tuple variants use Value/ValueN naming; we don't yet have
 		// metadata here to detect that. Default to the binding name
 		// (struct-variant convention), which is what Option B enums
 		// will produce in practice.
-		_ = i
-		g.Write(fmt.Sprintf("%s := %s.%s\n", vp.Name, dataVar, fieldName))
+		g.Write(fmt.Sprintf("%s := %s.%s\n", name, dataVar, name))
 	}
 }
 
