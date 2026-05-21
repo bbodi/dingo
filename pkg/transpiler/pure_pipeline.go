@@ -229,6 +229,21 @@ func PureASTTranspileWithMappingsOpts(source []byte, filename string, opts Trans
 	// Value enums need special handling: they use simple switch instead of type switch
 	stageStart = time.Now()
 	fullEnumRegistry := dingoast.ExtractFullEnumRegistry(source)
+	// Pull in enum declarations from sibling .dingo files in the same
+	// directory so a match expression can resolve a variant whose enum is
+	// declared in another file (e.g. a method file matching on the enum
+	// it lives next to). Silently no-ops when the file is anonymous or
+	// when no siblings exist.
+	if filename != "" {
+		sibReg := dingoast.ExtractEnumRegistryFromDir(filename)
+		if sibReg != nil {
+			if fullEnumRegistry == nil {
+				fullEnumRegistry = sibReg
+			} else {
+				fullEnumRegistry.Merge(sibReg)
+			}
+		}
+	}
 	logTiming("Extract full enum registry", stageStart)
 
 	// Step 0.5: Run every enabled character-level feature plugin against the
