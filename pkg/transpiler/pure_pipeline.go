@@ -243,6 +243,20 @@ func PureASTTranspileWithMappingsOpts(source []byte, filename string, opts Trans
 				fullEnumRegistry.Merge(sibReg)
 			}
 		}
+		// Also pull in enums declared in imported packages. The IR's
+		// `E_` enum lives in cmd/compile/internal/ir/expr_enum.dingo
+		// but is matched on from cmd/compile/internal/walk/*.dingo, so
+		// the sibling-only scan above cannot see it. ExtractEnumRegistry-
+		// FromImports walks each imported package directory and scans
+		// for enum declarations.
+		impReg := dingoast.ExtractEnumRegistryFromImports(filename, source)
+		if impReg != nil {
+			if fullEnumRegistry == nil {
+				fullEnumRegistry = impReg
+			} else {
+				fullEnumRegistry.Merge(impReg)
+			}
+		}
 	}
 	logTiming("Extract full enum registry", stageStart)
 

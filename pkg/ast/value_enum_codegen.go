@@ -220,6 +220,14 @@ type EnumRegistry struct {
 
 	// Collisions tracks naming conflicts for error reporting
 	Collisions []string
+
+	// EnumPackage maps each enum name to the Go package alias under which
+	// its types live, when the enum is imported from another package. An
+	// empty string (or absent key) means the enum is in the current
+	// package and its identifiers are used unqualified. Match codegen
+	// reads this to decide whether to emit `<Enum>Tag<Variant>` or
+	// `pkg.<Enum>Tag<Variant>` for the case clauses and data casts.
+	EnumPackage map[string]string
 }
 
 // NewEnumRegistry creates a new unified enum registry
@@ -230,7 +238,18 @@ func NewEnumRegistry() *EnumRegistry {
 		SharedFieldsEnums: make(map[string]bool),
 		ValueEnumVariants: make(map[string]*ValueEnumInfo),
 		EnumToVariants:    make(map[string][]string),
+		EnumPackage:       make(map[string]string),
 	}
+}
+
+// PackageOf returns the package alias under which the named enum is
+// declared, or "" if the enum is local to the current package. Safe on a
+// nil receiver.
+func (r *EnumRegistry) PackageOf(enumName string) string {
+	if r == nil {
+		return ""
+	}
+	return r.EnumPackage[enumName]
 }
 
 // RegisterSharedFieldsEnum marks an enum as using the Option B

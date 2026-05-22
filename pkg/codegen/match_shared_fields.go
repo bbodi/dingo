@@ -114,10 +114,28 @@ func (g *MatchCodeGen) emitSharedFieldsSwitch(enumName string) {
 	scrutVar := g.SharedTempVar("scrut")
 	g.Write(fmt.Sprintf("%s := %s\n", scrutVar, string(scrutineeResult.Output)))
 
-	g.Write(fmt.Sprintf("switch %s.tag {\n", scrutVar))
+	// Cross-package enum: when the matched enum lives in another package,
+	// every <Enum>Tag<Variant> / *<Enum><Variant>Data identifier we emit
+	// must be qualified with the package alias. pkgPrefix is "" for a
+	// local enum and "<alias>." when the enum was discovered via the
+	// import scan.
+	pkgPrefix := ""
+	if g.Context != nil && g.Context.ValueEnumReg != nil {
+		if pkg := g.Context.ValueEnumReg.PackageOf(enumName); pkg != "" {
+			pkgPrefix = pkg + "."
+		}
+	}
+	// scrut.tag is a lowercase unexported field on the enum struct, so
+	// it isn't accessible from outside the home package. For cross-package
+	// matches, fall back to the exported Tag() accessor.
+	tagAccess := ".tag"
+	if pkgPrefix != "" {
+		tagAccess = ".Tag()"
+	}
+	g.Write(fmt.Sprintf("switch %s%s {\n", scrutVar, tagAccess))
 
 	for _, arm := range g.Match.Arms {
-		g.emitSharedFieldsArm(enumName, scrutVar, arm)
+		g.emitSharedFieldsArm(enumName, pkgPrefix, scrutVar, arm)
 	}
 
 	g.Write("}")
@@ -141,12 +159,13 @@ type refBinding struct {
 }
 
 // emitSharedFieldsArm writes one `case` clause (or `default`) for a single
-// match arm.
-func (g *MatchCodeGen) emitSharedFieldsArm(enumName, scrutVar string, arm *ast.MatchArm) {
+// match arm. pkgPrefix is "" for a local enum and "<alias>." for a
+// cross-package enum (so the emitted Go references are qualified).
+func (g *MatchCodeGen) emitSharedFieldsArm(enumName, pkgPrefix, scrutVar string, arm *ast.MatchArm) {
 	switch pat := arm.Pattern.(type) {
 	case *ast.ConstructorPattern:
-		g.Write(fmt.Sprintf("case %sTag%s:\n", enumName, pat.Name))
-		refs := g.emitSharedFieldsBindings(enumName, scrutVar, pat)
+		g.Write(fmt.Sprintf("case %s%sTag%s:\n", pkgPrefix, enumName, pat.Name))
+		refs := g.emitSharedFieldsBindings(enumName, pkgPrefix, scrutVar, pat)
 		g.emitArmBody(arm, refs)
 
 	case *ast.WildcardPattern:
@@ -183,7 +202,7 @@ func (g *MatchCodeGen) emitSharedFieldsArm(enumName, scrutVar string, arm *ast.M
 // If the pattern has no bindings, only `_ = scrut.data` is emitted so
 // the unused-var lint is satisfied (and a future-proofing in case the
 // arm body needs the data — currently we just skip).
-func (g *MatchCodeGen) emitSharedFieldsBindings(enumName, scrutVar string, pat *ast.ConstructorPattern) []refBinding {
+func (g *MatchCodeGen) emitSharedFieldsBindings(enumName, pkgPrefix, scrutVar string, pat *ast.ConstructorPattern) []refBinding {
 	if len(pat.Params) == 0 {
 		return nil
 	}
@@ -224,10 +243,18 @@ func (g *MatchCodeGen) emitSharedFieldsBindings(enumName, scrutVar string, pat *
 		return nil
 	}
 
-	// Emit the cast.
-	dataStruct := fmt.Sprintf("*%s%sData", enumName, pat.Name)
+	// Emit the cast. For a local enum we cast scrut.data directly (`data`
+	// is an unexported field, OK in the home package). For a cross-package
+	// match we use the exported As<Variant>() accessor instead — it
+	// validates the tag and returns *<Enum><Variant>Data without touching
+	// the unexported `data` field.
 	dataVar := g.SharedTempVar("d")
-	g.Write(fmt.Sprintf("%s := %s.data.(%s)\n", dataVar, scrutVar, dataStruct))
+	if pkgPrefix != "" {
+		g.Write(fmt.Sprintf("%s := %s.As%s()\n", dataVar, scrutVar, pat.Name))
+	} else {
+		dataStruct := fmt.Sprintf("*%s%sData", enumName, pat.Name)
+		g.Write(fmt.Sprintf("%s := %s.data.(%s)\n", dataVar, scrutVar, dataStruct))
+	}
 
 	// Bindings:
 	//
