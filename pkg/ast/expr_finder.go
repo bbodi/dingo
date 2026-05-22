@@ -80,6 +80,46 @@ type ExprLocation struct {
 	VarName        string // for assignments: the variable name being assigned
 }
 
+// rparenIsMethodReceiver reports whether the RPAREN at allTokens[rparenIdx]
+// closes a Go method receiver list (`func (r T)` or `func (r *T)`). We
+// detect this by scanning back from the RPAREN to its matching LPAREN, then
+// checking whether the token immediately before that LPAREN is `func`.
+//
+// Used by the match-keyword backward check: a MATCH token preceded by an
+// RPAREN may be either an identifier in a method receiver-list close
+// (`func (r T) match(...)`) — keep it as identifier — or the start of a
+// new statement after any other parenthesised expression — treat it as
+// keyword. Without this disambiguation the detector incorrectly skips
+// every `f(...)\nmatch ...` form.
+func rparenIsMethodReceiver(allTokens []tokenizer.Token, rparenIdx int) bool {
+	depth := 1
+	for k := rparenIdx - 1; k >= 0; k-- {
+		switch allTokens[k].Kind {
+		case tokenizer.RPAREN:
+			depth++
+		case tokenizer.LPAREN:
+			depth--
+			if depth == 0 {
+				// Found the matching `(`. Look at the previous non-trivia
+				// token: if it's FUNC, this paren list is the method
+				// receiver, so the RPAREN we started from is the receiver
+				// close.
+				for m := k - 1; m >= 0; m-- {
+					switch allTokens[m].Kind {
+					case tokenizer.NEWLINE, tokenizer.SEMICOLON, tokenizer.COMMENT:
+						continue
+					case tokenizer.FUNC:
+						return true
+					}
+					return false
+				}
+				return false
+			}
+		}
+	}
+	return false
+}
+
 // FindDingoExpressions scans source code and returns all match and lambda expression locations
 func FindDingoExpressions(src []byte) ([]ExprLocation, error) {
 	tok := tokenizer.New(src)
@@ -131,8 +171,20 @@ func FindDingoExpressions(src []byte) ([]ExprLocation, error) {
 					switch allTokens[j].Kind {
 					case tokenizer.NEWLINE, tokenizer.SEMICOLON, tokenizer.COMMENT:
 						continue
-					case tokenizer.DOT, tokenizer.FUNC, tokenizer.RPAREN:
+					case tokenizer.DOT, tokenizer.FUNC:
 						skip = true
+					case tokenizer.RPAREN:
+						// RPAREN alone is ambiguous: it could be the
+						// close of a method receiver
+						// (`func (r T) match(...)`) — in which case
+						// `match` is an identifier — OR the close of any
+						// other call/parenthesised expression on the
+						// previous statement
+						// (`f()` then `match e { ... }` on the next
+						// line). Only treat it as the method-receiver
+						// case if a `func` keyword precedes the matching
+						// `(` at the same paren depth.
+						skip = rparenIsMethodReceiver(allTokens, j)
 					}
 					break
 				}
